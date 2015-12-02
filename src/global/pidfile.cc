@@ -96,3 +96,24 @@ int pidfile_remove(void)
   pid_file[0] = '\0';
   return 0;
 }
+
+int test_pid_file_in_use(const md_config_t *conf) 
+{
+  int fd;
+  snprintf(pid_file, PATH_MAX, "%s", conf->pid_file.c_str());
+  fd = ::open(pid_file, O_CREAT|O_WRONLY, 0644));
+  if (fd < 0) {
+     int err = errno;
+     derr << "write_pid_file: failed to open pid file '"
+          << pid_file << "': " << cpp_strerror(err) << dendl;
+     return err;
+   }
+   
+   struct flock l = { F_WRLCK, SEEK_SET, 0, 0, 0 };
+   int r = ::fcntl(fd, F_SETLK, &l);
+   if (r < 0) {
+       derr << "failed to lock" << pid_file << ".is there another process in using?" << dendl;
+       return r;
+   }
+   return 0;
+}

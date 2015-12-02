@@ -261,6 +261,11 @@ int global_init_prefork(CephContext *cct)
 {
   if (g_code_env != CODE_ENVIRONMENT_DAEMON)
     return -1;
+    
+  if (test_pid_file_in_use(g_conf) < 0) {
+     exit(1);
+  }
+  
   const md_config_t *conf = cct->_conf;
   if (!conf->daemonize) {
     if (atexit(pidfile_remove_void)) {
@@ -292,7 +297,11 @@ void global_init_daemonize(CephContext *cct)
 	 << cpp_strerror(ret) << dendl;
     exit(1);
   }
-
+  
+ if (test_pid_file_in_use(g_conf) < 0) {
+    exit(1);
+ }
+ 
   global_init_postfork_start(cct);
   global_init_postfork_finish(cct);
 #else

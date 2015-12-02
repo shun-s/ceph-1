@@ -25,4 +25,7 @@ int pidfile_write(const md_config_t *conf);
 // This is safe to call in a signal handler context.
 int pidfile_remove(void);
 
+//test whether the pid_file is being used by another process
+int test_pid_file_in_use(const md_config_t *conf);
+
 #endif
