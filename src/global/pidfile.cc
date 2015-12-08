@@ -106,7 +106,7 @@ int test_pid_file_in_use(const md_config_t *conf)
      int err = errno;
      derr << "write_pid_file: failed to open pid file '"
           << pid_file << "': " << cpp_strerror(err) << dendl;
-     return err;
+     exit(1);
    }
    
    struct flock l = { F_WRLCK, SEEK_SET, 0, 0, 0 };
