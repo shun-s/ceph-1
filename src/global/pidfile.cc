@@ -101,7 +101,7 @@ int test_pid_file_in_use(const md_config_t *conf)
 {
   int fd;
   snprintf(pid_file, PATH_MAX, "%s", conf->pid_file.c_str());
-  fd = ::open(pid_file, O_CREAT|O_WRONLY, 0644));
+  fd = ::open(pid_file, O_CREAT|O_WRONLY, 0644);
   if (fd < 0) {
      int err = errno;
      derr << "write_pid_file: failed to open pid file '"
