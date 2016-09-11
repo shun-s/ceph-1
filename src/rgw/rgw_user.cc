@@ -1120,6 +1120,63 @@ int RGWAccessKeyPool::remove(RGWUserAdminOpState& op_state, std::string *err_msg
   return 0;
 }
 
+// remove all keys associated with a subuser
+int RGWAccessKeyPool::remove_subuser_keys(RGWUserAdminOpState& op_state,
+        std::string *err_msg, bool defer_user_update)
+{
+  int ret = 0;
+
+  if (!op_state.is_populated()) {
+    set_err_msg(err_msg, "user info was not populated");
+    return -EINVAL;
+  }
+
+  if (!op_state.has_subuser()) {
+    set_err_msg(err_msg, "no subuser specified");
+    return -EINVAL;
+  }
+
+  std::string swift_kid = op_state.build_default_swift_kid();
+  if (swift_kid.empty()) {
+    set_err_msg(err_msg, "empty swift access key");
+    return -EINVAL;
+  }
+
+  map<std::string, RGWAccessKey>::iterator kiter;
+  map<std::string, RGWAccessKey> *keys_map;
+
+  // a subuser can have at most one swift key
+  keys_map = swift_keys;
+  kiter = keys_map->find(swift_kid);
+  if (kiter != keys_map->end()) {
+    rgw_remove_key_index(store, kiter->second);
+    keys_map->erase(kiter);
+  }
+
+  // a subuser may have multiple s3 key pairs
+  std::string subuser_str = op_state.get_subuser();
+  keys_map = access_keys;
+  RGWUserInfo user_info = op_state.get_user_info();
+  map<std::string, RGWAccessKey>::iterator user_kiter = user_info.access_keys.begin();
+  for (; user_kiter != user_info.access_keys.end(); ++user_kiter) {
+    if (user_kiter->second.subuser == subuser_str) {
+      kiter = keys_map->find(user_kiter->first);
+      if (kiter != keys_map->end()) {
+        rgw_remove_key_index(store, kiter->second);
+        keys_map->erase(kiter);
+      }
+    }
+  }
+
+  if (!defer_user_update)
+    ret = user->update(op_state, err_msg);
+
+  if (ret < 0)
+    return ret;
+
+  return 0;
+}
+
 RGWSubUserPool::RGWSubUserPool(RGWUser *usr)
 {
   subusers_allowed = (usr != NULL);
@@ -1284,18 +1341,19 @@ int RGWSubUserPool::execute_remove(RGWUserAdminOpState& op_state,
 
   map<std::string, RGWSubUser>::iterator siter;
   siter = subuser_map->find(subuser_str);
-
+  if (siter == subuser_map->end()){
+    set_err_msg(err_msg, "subuser not found: " + subuser_str);
+    return -EINVAL;
+  }
   if (!op_state.has_existing_subuser()) {
     set_err_msg(err_msg, "subuser not found: " + subuser_str);
     return -EINVAL;
   }
 
-  if (op_state.will_purge_keys()) {
-    // error would be non-existance so don't check
-    user->keys.remove(op_state, &subprocess_msg, true);
-  }
+  // always purge all associate keys
+  user->keys.remove_subuser_keys(op_state, &subprocess_msg, true);
 
-  //remove the subuser from the user info
+  // remove the subuser from the user info
   subuser_map->erase(siter);
 
   // attempt to save the subuser
@@ -1780,8 +1838,18 @@ int RGWUser::execute_add(RGWUserAdminOpState& op_state, std::string *err_msg)
   if (op_state.op_mask_specified)
     user_info.op_mask = op_state.get_op_mask();
 
-  if (op_state.has_bucket_quota())
+  if (op_state.has_bucket_quota()) {
     user_info.bucket_quota = op_state.get_bucket_quota();
+  } else {
+    if (cct->_conf->rgw_bucket_default_quota_max_objects >= 0) {
+      user_info.bucket_quota.max_objects = cct->_conf->rgw_bucket_default_quota_max_objects;
+      user_info.bucket_quota.enabled = true;
+    }
+    if (cct->_conf->rgw_bucket_default_quota_max_size >= 0) {
+      user_info.bucket_quota.max_size_kb = cct->_conf->rgw_bucket_default_quota_max_size;
+      user_info.bucket_quota.enabled = true;
+    }
+  }
 
   if (op_state.temp_url_key_specified) {
     map<int, string>::iterator iter;
@@ -1791,8 +1859,18 @@ int RGWUser::execute_add(RGWUserAdminOpState& op_state, std::string *err_msg)
     }
   }
 
-  if (op_state.has_user_quota())
+  if (op_state.has_user_quota()) {
     user_info.user_quota = op_state.get_user_quota();
+  } else {
+    if (cct->_conf->rgw_user_default_quota_max_objects >= 0) {
+      user_info.user_quota.max_objects = cct->_conf->rgw_user_default_quota_max_objects;
+      user_info.user_quota.enabled = true;
+    }
+    if (cct->_conf->rgw_user_default_quota_max_size >= 0) {
+      user_info.user_quota.max_size_kb = cct->_conf->rgw_user_default_quota_max_size;
+      user_info.user_quota.enabled = true;
+    }
+  }
 
   // update the request
   op_state.set_user_info(user_info);
@@ -2428,7 +2506,11 @@ public:
           time_t mtime, JSONObj *obj, sync_type_t sync_mode) {
     RGWUserInfo info;
 
-    decode_json_obj(info, obj);
+    try {
+      decode_json_obj(info, obj);
+    } catch (JSONDecoder::err& e) {
+      return -EINVAL;
+    }
 
     RGWUserInfo old_info;
     time_t orig_mtime;

@@ -898,7 +898,7 @@ int RGWPutObjProcessor::complete(string& etag, time_t *mtime, time_t set_mtime,
   if (r < 0)
     return r;
 
-  is_complete = true;
+  is_complete = !canceled;
   return 0;
 }
 
@@ -1189,18 +1189,33 @@ int RGWPutObjProcessor_Atomic::complete_writing_data()
     first_chunk.claim(pending_data_bl);
     obj_len = (uint64_t)first_chunk.length();
   }
-  if (pending_data_bl.length()) {
+  while (pending_data_bl.length()) {
     void *handle;
+    uint64_t max_write_size = MIN(max_chunk_size, (uint64_t)next_part_ofs - data_ofs);
+    if (max_write_size > pending_data_bl.length()) {
+      max_write_size = pending_data_bl.length();
+    }
+    bufferlist bl;
+    pending_data_bl.splice(0, max_write_size, &bl);
     rgw_obj obj;
-    int r = write_data(pending_data_bl, data_ofs, &handle, &obj, false);
+    int r = write_data(bl, data_ofs, &handle, &obj, false);
     if (r < 0) {
       ldout(store->ctx(), 0) << "ERROR: write_data() returned " << r << dendl;
       return r;
     }
+    data_ofs += bl.length();
     r = throttle_data(handle, obj, false);
     if (r < 0) {
       ldout(store->ctx(), 0) << "ERROR: throttle_data() returned " << r << dendl;
       return r;
+    }
+
+    if (data_ofs >= next_part_ofs) {
+      r = prepare_next_part(data_ofs);
+      if (r < 0) {
+        ldout(store->ctx(), 0) << "ERROR: prepare_next_part() returned " << r << dendl;
+        return r;
+      }
     }
   }
   int r = complete_parts();
@@ -1247,6 +1262,8 @@ int RGWPutObjProcessor_Atomic::do_complete(string& etag, time_t *mtime, time_t s
   if (r < 0) {
     return r;
   }
+
+  canceled = obj_op.meta.canceled;
 
   return 0;
 }
@@ -1408,6 +1425,10 @@ int RGWRados::get_required_alignment(rgw_bucket& bucket, uint64_t *alignment)
   }
 
   *alignment = ioctx.pool_required_alignment();
+  if (*alignment != 0) {
+    ldout(cct, 20) << "required alignment=" << *alignment << dendl;
+  }
+
   return 0;
 }
 
@@ -1432,6 +1453,8 @@ int RGWRados::get_max_chunk_size(rgw_bucket& bucket, uint64_t *max_chunk_size)
   }
 
   *max_chunk_size = config_chunk_size - (config_chunk_size % alignment);
+
+  ldout(cct, 20) << "max_chunk_size=" << *max_chunk_size << dendl;
 
   return 0;
 }
@@ -3461,6 +3484,8 @@ int RGWRados::Object::Write::write_meta(uint64_t size,
     }
   }
 
+  meta.canceled = false;
+
   /* update quota cache */
   store->quota_handler->update_stats(meta.owner, bucket, (orig_exists ? 0 : 1), size, orig_size);
 
@@ -3471,6 +3496,8 @@ done_cancel:
   if (ret < 0) {
     ldout(store->ctx(), 0) << "ERROR: index_op.cancel()() returned ret=" << ret << dendl;
   }
+
+  meta.canceled = true;
 
   /* we lost in a race. There are a few options:
    * - existing object was rewritten (ECANCELED)
@@ -3704,6 +3731,10 @@ public:
   int complete(string& etag, time_t *mtime, time_t set_mtime, map<string, bufferlist>& attrs) {
     return processor->complete(etag, mtime, set_mtime, attrs);
   }
+
+  bool is_canceled() {
+    return processor->is_canceled();
+  }
 };
 
 /*
@@ -3785,6 +3816,7 @@ int RGWRados::fetch_remote_obj(RGWObjectCtx& obj_ctx,
                const char *if_match,
                const char *if_nomatch,
                AttrsMod attrs_mod,
+               bool copy_if_newer,
                map<string, bufferlist>& attrs,
                RGWObjCategory category,
                uint64_t olh_epoch,
@@ -3800,6 +3832,7 @@ int RGWRados::fetch_remote_obj(RGWObjectCtx& obj_ctx,
   RGWRESTStreamReadRequest *in_stream_req;
   string tag;
   map<string, bufferlist> src_attrs;
+  int i;
   append_rand_alpha(cct, tag, tag, 32);
 
   RGWPutObjProcessor_Atomic processor(obj_ctx,
@@ -3845,8 +3878,26 @@ int RGWRados::fetch_remote_obj(RGWObjectCtx& obj_ctx,
   string etag;
   map<string, string> req_headers;
   time_t set_mtime;
+
+  RGWObjState *dest_state = NULL;
+
+  time_t dest_mtime;
+  const time_t *pmod = mod_ptr;
+
+  if (copy_if_newer) {
+    /* need to get mtime for destination */
+    ret = get_obj_state(&obj_ctx, dest_obj, &dest_state, NULL);
+    if (ret < 0)
+      return ret;
+
+    if (dest_state->exists) {
+      dest_mtime = dest_state->mtime;
+      pmod = &dest_mtime;
+    }
+  }
+
  
-  ret = conn->get_obj(user_id, info, src_obj, true, &cb, &in_stream_req);
+  ret = conn->get_obj(user_id, info, src_obj, pmod, unmod_ptr, true, &cb, &in_stream_req);
   if (ret < 0) {
     goto set_err_state;
   }
@@ -3889,8 +3940,34 @@ int RGWRados::fetch_remote_obj(RGWObjectCtx& obj_ctx,
     attrs = src_attrs;
   }
 
-  ret = cb.complete(etag, mtime, set_mtime, attrs);
-  if (ret < 0) {
+#define MAX_COMPLETE_RETRY 100
+  for (i = 0; i < MAX_COMPLETE_RETRY; i++) {
+    ret = cb.complete(etag, mtime, set_mtime, attrs);
+    if (ret < 0) {
+      goto set_err_state;
+    }
+    if (copy_if_newer && cb.is_canceled()) {
+      ldout(cct, 20) << "raced with another write of obj: " << dest_obj << dendl;
+      obj_ctx.invalidate(dest_obj); /* object was overwritten */
+      ret = get_obj_state(&obj_ctx, dest_obj, &dest_state, NULL);
+      if (ret < 0) {
+        ldout(cct, 0) << "ERROR: " << __func__ << ": get_err_state() returned ret=" << ret << dendl;
+        goto set_err_state;
+      }
+      if (!dest_state->exists ||
+        dest_state->mtime < set_mtime) {
+        ldout(cct, 20) << "retrying writing object mtime=" << set_mtime << " dest_state->mtime=" << dest_state->mtime << " dest_state->exists=" << dest_state->exists << dendl;
+        continue;
+      } else {
+        ldout(cct, 20) << "not retrying writing object mtime=" << set_mtime << " dest_state->mtime=" << dest_state->mtime << " dest_state->exists=" << dest_state->exists << dendl;
+      }
+    }
+    break;
+  }
+
+  if (i == MAX_COMPLETE_RETRY) {
+    ldout(cct, 0) << "ERROR: retried object completion too many times, something is wrong!" << dendl;
+    ret = -EIO;
     goto set_err_state;
   }
 
@@ -3901,7 +3978,12 @@ int RGWRados::fetch_remote_obj(RGWObjectCtx& obj_ctx,
 
   return 0;
 set_err_state:
-  int r = opstate.set_state(RGWOpState::OPSTATE_ERROR);
+  RGWOpState::OpState state = RGWOpState::OPSTATE_ERROR;
+  if (copy_if_newer && ret == -ERR_NOT_MODIFIED) {
+    state = RGWOpState::OPSTATE_COMPLETE;
+    ret = 0;
+  }
+  int r = opstate.set_state(state);
   if (r < 0) {
     ldout(cct, 0) << "ERROR: failed to set opstate r=" << ret << dendl;
   }
@@ -3967,6 +4049,7 @@ int RGWRados::copy_obj(RGWObjectCtx& obj_ctx,
                const char *if_match,
                const char *if_nomatch,
                AttrsMod attrs_mod,
+               bool copy_if_newer,
                map<string, bufferlist>& attrs,
                RGWObjCategory category,
                uint64_t olh_epoch,
@@ -4001,7 +4084,7 @@ int RGWRados::copy_obj(RGWObjectCtx& obj_ctx,
   if (remote_src || !source_zone.empty()) {
     return fetch_remote_obj(obj_ctx, user_id, client_id, op_id, info, source_zone,
                dest_obj, src_obj, dest_bucket_info, src_bucket_info, src_mtime, mtime, mod_ptr,
-               unmod_ptr, if_match, if_nomatch, attrs_mod, attrs, category,
+               unmod_ptr, if_match, if_nomatch, attrs_mod, copy_if_newer, attrs, category,
                olh_epoch, version_id, ptag, petag, err, progress_cb, progress_data);
   }
 
@@ -4310,8 +4393,8 @@ bool RGWRados::is_syncing_bucket_meta(rgw_bucket& bucket)
 int RGWRados::delete_bucket(rgw_bucket& bucket, RGWObjVersionTracker& objv_tracker)
 {
   librados::IoCtx index_ctx;
-  string oid;
-  int r = open_bucket_index(bucket, index_ctx, oid);
+  map<int, string> bucket_objs;
+  int r = open_bucket_index(bucket, index_ctx, bucket_objs);
   if (r < 0)
     return r;
 
@@ -4351,6 +4434,11 @@ int RGWRados::delete_bucket(rgw_bucket& bucket, RGWObjVersionTracker& objv_track
     r= rgw_bucket_instance_remove_entry(this, entry, &objv_tracker);
     if (r < 0) {
       return r;
+    }
+    /* remove bucket index objects*/
+    map<int, string>::const_iterator biter;
+    for (biter = bucket_objs.begin(); biter != bucket_objs.end(); ++biter) {
+      index_ctx.remove(biter->second);
     }
   }
   return 0;
@@ -5453,7 +5541,7 @@ int RGWRados::Object::Read::prepare(int64_t *pofs, int64_t *pend)
 
     if (conds.mod_ptr) {
       ldout(cct, 10) << "If-Modified-Since: " << *conds.mod_ptr << " Last-Modified: " << ctime << dendl;
-      if (ctime < *conds.mod_ptr) {
+      if (ctime <= *conds.mod_ptr) {
         return -ERR_NOT_MODIFIED;
       }
     }
@@ -6479,7 +6567,7 @@ void RGWRados::bucket_index_guard_olh_op(RGWObjState& olh_state, ObjectOperation
   op.cmpxattr(RGW_ATTR_OLH_ID_TAG, CEPH_OSD_CMPXATTR_OP_EQ, olh_state.olh_tag);
 }
 
-int RGWRados::bucket_index_unlink_instance(rgw_obj& obj_instance, const string& op_tag, uint64_t olh_epoch)
+int RGWRados::bucket_index_unlink_instance(rgw_obj& obj_instance, const string& op_tag, const string& olh_tag, uint64_t olh_epoch)
 {
   rgw_rados_ref ref;
   rgw_bucket bucket;
@@ -6496,7 +6584,7 @@ int RGWRados::bucket_index_unlink_instance(rgw_obj& obj_instance, const string& 
   }
 
   cls_rgw_obj_key key(obj_instance.get_index_key_name(), obj_instance.get_instance());
-  ret = cls_rgw_bucket_unlink_instance(bs.index_ctx, bs.bucket_obj, key, op_tag, olh_epoch, zone_public_config.log_data);
+  ret = cls_rgw_bucket_unlink_instance(bs.index_ctx, bs.bucket_obj, key, op_tag, olh_tag, olh_epoch, zone_public_config.log_data);
   if (ret < 0) {
     return ret;
   }
@@ -6837,7 +6925,9 @@ int RGWRados::unlink_obj_instance(RGWObjectCtx& obj_ctx, RGWBucketInfo& bucket_i
       return ret;
     }
 
-    ret = bucket_index_unlink_instance(target_obj, op_tag, olh_epoch);
+    string olh_tag(state->olh_tag.c_str(), state->olh_tag.length());
+
+    ret = bucket_index_unlink_instance(target_obj, op_tag, olh_tag, olh_epoch);
     if (ret < 0) {
       ldout(cct, 20) << "bucket_index_link_olh() target_obj=" << target_obj << " returned " << ret << dendl;
       if (ret == -ECANCELED) {
@@ -8087,6 +8177,7 @@ int RGWRados::cls_bucket_list(rgw_bucket& bucket, rgw_obj_key& start, const stri
   map<string, bufferlist> updates;
   uint32_t count = 0;
   while (count < num_entries && !candidates.empty()) {
+    r = 0;
     // Select the next one
     int pos = candidates.begin()->second;
     const string& name = vcurrents[pos]->first;
@@ -9020,5 +9111,50 @@ librados::Rados* RGWRados::get_rados_handle()
       return rados[handle];
     }
   }
+}
+
+int RGWRados::delete_obj_aio(rgw_obj& obj, rgw_bucket& bucket,
+                             RGWBucketInfo& bucket_info, RGWObjState *astate,
+                             list<librados::AioCompletion *>& handles, bool keep_index_consistent)
+{
+  rgw_rados_ref ref;
+  int ret = get_obj_ref(obj, &ref, &bucket);
+  if (ret < 0) {
+    lderr(cct) << "ERROR: failed to get obj ref with ret=" << ret << dendl;
+    return ret;
+  }
+
+  if (keep_index_consistent) {
+    RGWRados::Bucket bop(this, bucket_info.bucket);
+    RGWRados::Bucket::UpdateIndex index_op(&bop, obj, astate);
+
+    ret = index_op.prepare(CLS_RGW_OP_DEL);
+    if (ret < 0) {
+      lderr(cct) << "ERROR: failed to prepare index op with ret=" << ret << dendl;
+      return ret;
+    }
+  }
+
+  ObjectWriteOperation op;
+  list<string> prefixes;
+  cls_rgw_remove_obj(op, prefixes);
+
+  AioCompletion *c = librados::Rados::aio_create_completion(NULL, NULL, NULL);
+  ret = ref.ioctx.aio_operate(ref.oid, c, &op);
+  if (ret < 0) {
+    lderr(cct) << "ERROR: AioOperate failed with ret=" << ret << dendl;
+    return ret;
+  }
+
+  handles.push_back(c);
+
+  if (keep_index_consistent) {
+    ret = delete_obj_index(obj);
+    if (ret < 0) {
+      lderr(cct) << "ERROR: failed to delete obj index with ret=" << ret << dendl;
+      return ret;
+    }
+  }
+  return ret;
 }
 
