@@ -749,6 +749,7 @@ class TestCephDiskDeactivateAndDestroy(unittest.TestCase):
                             'ptype': DMCRYPT_LUKS_OSD_UUID,
                             'path': '/dev/sdX1',
                             'whoami': '5566',
+                            'type': 'data',
                             'mount': '/var/lib/ceph/osd/ceph-5566/',
                             'uuid': part_uuid,
                         }]}]
@@ -771,6 +772,7 @@ class TestCephDiskDeactivateAndDestroy(unittest.TestCase):
                             'ptype': DMCRYPT_LUKS_OSD_UUID,
                             'path': '/dev/sdX1',
                             'whoami': '5566',
+                            'type': 'data',
                             'mount': '/var/lib/ceph/osd/ceph-5566/',
                             'uuid': part_uuid,
                         }]}]
