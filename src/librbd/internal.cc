@@ -1934,9 +1934,33 @@ int validate_pool(IoCtx &io_ctx, CephContext *cct) {
     uint64_t period = src->get_stripe_period();
     unsigned fadvise_flags = LIBRADOS_OP_FLAG_FADVISE_SEQUENTIAL |
 			     LIBRADOS_OP_FLAG_FADVISE_NOCACHE;
+    uint64_t object_id = 0;
     for (uint64_t offset = 0; offset < src_size; offset += period) {
       if (throttle.pending_error()) {
         return throttle.wait_for_ret();
+      }
+      
+      {
+        RWLock::RLocker snap_locker(src->snap_lock);
+        bool skip = true;
+        if (src->object_map != nullptr)
+        { 
+          // each period is related to src->stripe_count objects, check them all
+          for (uint32_t i=0; i < src->stripe_count; i++)
+          {   
+            if (object_id < src->object_map->size() && 
+                 src->object_map->object_may_exist(object_id))
+            { 
+              skip = false;
+            }
+            object_id++;
+          }
+
+          if (skip) continue;
+
+        } else {
+          object_id += src->stripe_count;
+        }
       }
 
       uint64_t len = min(period, src_size - offset);
