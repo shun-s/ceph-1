@@ -49,7 +49,7 @@ public:
   int unregister_update_watcher(uint64_t handle);
   void flush_update_watchers(Context *on_finish);
   void shut_down_update_watchers(Context *on_finish);
-
+  
 private:
   enum State {
     STATE_UNINITIALIZED,

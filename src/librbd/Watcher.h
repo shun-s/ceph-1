@@ -56,11 +56,16 @@ public:
     RWLock::RLocker locker(m_watch_lock);
     return m_watch_state == WATCH_STATE_REGISTERED;
   }
+
   bool is_unregistered() const {
     RWLock::RLocker locker(m_watch_lock);
     return m_watch_state == WATCH_STATE_UNREGISTERED;
   }
-
+  
+  void set_image_closing_state(bool state) {
+    m_image_closing = state;
+  }
+ 
 protected:
   enum WatchState {
     WATCH_STATE_UNREGISTERED,
@@ -79,6 +84,7 @@ protected:
   watcher::Notifier m_notifier;
   WatchState m_watch_state;
   AsyncOpTracker m_async_op_tracker;
+  bool m_image_closing = false;
 
   void send_notify(bufferlist &payload,
                    watcher::NotifyResponse *response = nullptr,

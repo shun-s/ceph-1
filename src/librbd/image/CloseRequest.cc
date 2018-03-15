@@ -193,7 +193,8 @@ void CloseRequest<I>::send_unregister_image_watcher() {
 
   CephContext *cct = m_image_ctx->cct;
   ldout(cct, 10) << this << " " << __func__ << dendl;
-
+  
+  m_image_ctx->image_watcher->set_image_closing_state(true);
   m_image_ctx->image_watcher->unregister_watch(create_context_callback<
     CloseRequest<I>, &CloseRequest<I>::handle_unregister_image_watcher>(this));
 }
