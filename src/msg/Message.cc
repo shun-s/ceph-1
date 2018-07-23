@@ -60,6 +60,7 @@ using namespace std;
 #include "messages/MOSDBeacon.h"
 #include "messages/MOSDPGTemp.h"
 #include "messages/MOSDFailure.h"
+#include "messages/MNodeFailure.h"
 #include "messages/MOSDMarkMeDown.h"
 #include "messages/MOSDFull.h"
 #include "messages/MOSDPing.h"
@@ -451,6 +452,9 @@ Message *decode_message(CephContext *cct, int crcflags,
     break;
   case MSG_OSD_FAILURE:
     m = new MOSDFailure();
+    break;
+  case MSG_NODE_FAILURE:
+    m = new MNodeFailure();
     break;
   case MSG_OSD_MARK_ME_DOWN:
     m = new MOSDMarkMeDown();

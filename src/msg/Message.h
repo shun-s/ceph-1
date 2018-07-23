@@ -123,6 +123,8 @@
 #define MSG_OSD_PG_RECOVERY_DELETE 118
 #define MSG_OSD_PG_RECOVERY_DELETE_REPLY 119
 
+#define MSG_NODE_FAILURE 120
+
 // *** MDS ***
 
 #define MSG_MDS_BEACON             100  // to monitor

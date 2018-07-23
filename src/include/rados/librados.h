@@ -440,6 +440,8 @@ CEPH_RADOS_API int rados_create_with_context(rados_t *cluster,
 CEPH_RADOS_API int rados_ping_monitor(rados_t cluster, const char *mon_id,
                                       char **outstr, size_t *outstrlen);
 
+CEPH_RADOS_API int rados_report_node_down(rados_t cluster, int id, double duration, unsigned char flag);
+
 /**
  * Connect to the cluster.
  *

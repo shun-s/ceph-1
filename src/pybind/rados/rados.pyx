@@ -169,6 +169,7 @@ cdef extern from "rados/librados.h" nogil:
                                         size_t *key_len, char *values,
                                         size_t *value_len)
     int rados_ping_monitor(rados_t cluster, const char *mon_id, char **outstr, size_t *outstrlen)
+    int rados_report_node_down(rados_t cluster, int id, double duration, unsigned char flag)
     int rados_mon_command(rados_t cluster, const char **cmd, size_t cmdlen,
                           const char *inbuf, size_t inbuflen,
                           char **outbuf, size_t *outbuflen,
@@ -863,6 +864,23 @@ Rados object in state %s." % self.state)
             my_outstr = outstr[:outstrlen]
             rados_buffer_free(outstr)
             return decode_cstr(my_outstr)
+  
+    def report_node_down(self, id, duration, flag):
+        """
+        flag 1 for failed, 
+        flag 0 for alive
+        """
+        self.require_state("configuring", "connected")
+        ret = 0
+        cdef:
+            int _id = id
+            double _duration = duration
+            unsigned char _flag = flag
+
+        with nogil:
+            ret = rados_report_node_down(self.cluster, _id, _duration, _flag)
+       
+        return ret
 
     def connect(self, timeout=0):
         """

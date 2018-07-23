@@ -235,6 +235,18 @@ int librados::RadosClient::ping_monitor(const string mon_id, string *result)
   return err;
 }
 
+int librados::RadosClient::report_node_down(int id, double duration, unsigned char flag)
+{
+  int err = 0;
+  if (state != CONNECTED) {
+    ldout(cct, 10) << __func__ << " connecstate isn't connected" << dendl;
+    return -EAGAIN;
+  }
+
+  err = monclient.report_node_down(id, duration, flag);
+  return err;
+}
+
 int librados::RadosClient::connect()
 {
   common_init_finish(cct);

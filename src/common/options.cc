@@ -1316,6 +1316,10 @@ std::vector<Option> get_global_options() {
     .set_default("host")
     .set_description(""),
 
+    Option("mon_node_markdown_grace", Option::TYPE_FLOAT, Option::LEVEL_DEV)
+    .set_default(300)
+    .set_description(""),
+
     Option("mon_osd_snap_trim_queue_warn_on", Option::TYPE_INT, Option::LEVEL_ADVANCED)
     .set_default(32768)
     .set_description("Warn when snap trim queue is that large (or larger).")

@@ -367,6 +367,7 @@ public:
    *             expired (default: conf->client_mount_timeout).
    */
   int ping_monitor(const string &mon_id, string *result_reply);
+  int report_node_down(int id, double duration, __u8 flag);
 
   void send_mon_message(Message *m) {
     Mutex::Locker l(monc_lock);

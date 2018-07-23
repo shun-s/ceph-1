@@ -91,6 +91,7 @@ public:
   explicit RadosClient(CephContext *cct_);
   ~RadosClient() override;
   int ping_monitor(string mon_id, string *result);
+  int report_node_down(int id, double duration, unsigned char flag);
   int connect();
   void shutdown();
 

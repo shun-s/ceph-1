@@ -29,6 +29,7 @@
 
 #include "messages/MMonSubscribe.h"
 #include "messages/MMonSubscribeAck.h"
+#include "messages/MNodeFailure.h"
 #include "common/errno.h"
 #include "common/LogClient.h"
 
@@ -229,6 +230,12 @@ int MonClient::ping_monitor(const string &mon_id, string *result_reply)
   delete smsgr;
   delete pinger;
   return ret;
+}
+
+int MonClient::report_node_down(int id, double duration, __u8 flag) {
+  ldout(cct, 10) << __func__ << dendl;
+  send_mon_message(new MNodeFailure(get_fsid(), id, duration, 0, flag));
+  return 0;
 }
 
 bool MonClient::ms_dispatch(Message *m)

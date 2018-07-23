@@ -288,6 +288,7 @@ OPTION(mon_sync_debug, OPT_BOOL) // enable sync-specific debug
 OPTION(mon_inject_sync_get_chunk_delay, OPT_DOUBLE)  // inject N second delay on each get_chunk request
 OPTION(mon_osd_min_down_reporters, OPT_INT)   // number of OSDs from different subtrees who need to report a down OSD for it to count
 OPTION(mon_osd_reporter_subtree_level , OPT_STR)   // in which level of parent bucket the reporters are counted
+OPTION(mon_node_markdown_grace, OPT_DOUBLE) 
 OPTION(mon_osd_force_trim_to, OPT_INT)   // force mon to trim maps to this point, regardless of min_last_epoch_clean (dangerous)
 OPTION(mon_mds_force_trim_to, OPT_INT)   // force mon to trim mdsmaps to this point (dangerous)
 OPTION(mon_mds_skip_sanity, OPT_BOOL)  // skip safety assertions on FSMap (in case of bugs where we want to continue anyway)

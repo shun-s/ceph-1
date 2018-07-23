@@ -3404,6 +3404,12 @@ extern "C" int rados_ping_monitor(rados_t cluster, const char *mon_id,
   return ret;
 }
 
+extern "C" int rados_report_node_down(rados_t cluster, int id, double duration, unsigned char flag) {
+  librados::RadosClient *client = (librados::RadosClient *)cluster;
+  int ret = client->report_node_down(id, duration, flag);
+  return ret;
+}
+
 extern "C" int rados_mon_command(rados_t cluster, const char **cmd,
 				 size_t cmdlen,
 				 const char *inbuf, size_t inbuflen,

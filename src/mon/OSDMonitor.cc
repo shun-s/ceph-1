@@ -53,6 +53,7 @@
 #include "messages/MRemoveSnaps.h"
 #include "messages/MOSDScrub.h"
 #include "messages/MRoute.h"
+#include "messages/MNodeFailure.h"
 
 #include "common/version.h"
 #include "common/TextTable.h"
@@ -1647,6 +1648,8 @@ bool OSDMonitor::preprocess_query(MonOpRequestRef op)
     return preprocess_full(op);
   case MSG_OSD_FAILURE:
     return preprocess_failure(op);
+  case MSG_NODE_FAILURE:
+    return preprocess_node_failure(op);
   case MSG_OSD_BOOT:
     return preprocess_boot(op);
   case MSG_OSD_ALIVE:
@@ -1684,6 +1687,8 @@ bool OSDMonitor::prepare_update(MonOpRequestRef op)
     return prepare_full(op);
   case MSG_OSD_FAILURE:
     return prepare_failure(op);
+  case MSG_NODE_FAILURE:
+    return prepare_node_failure(op);
   case MSG_OSD_BOOT:
     return prepare_boot(op);
   case MSG_OSD_ALIVE:
@@ -1860,6 +1865,28 @@ bool OSDMonitor::preprocess_failure(MonOpRequestRef op)
   }
 
   dout(10) << "preprocess_failure new: " << m->get_target() << ", from " << m->get_orig_source_inst() << dendl;
+  return false;
+
+ didit:
+  return true;
+}
+
+bool OSDMonitor::preprocess_node_failure(MonOpRequestRef op)
+{
+  op->mark_osdmon_event(__func__);
+  MNodeFailure *m = static_cast<MNodeFailure*>(op->get_req());
+  int badboy = m->get_target();
+  // check permissions
+  if (check_source(m, m->fsid)) {
+    goto didit;
+  }
+
+  // already down?
+  if (osdmap.subtree_is_down(badboy, NULL)) {
+    goto didit;
+  }
+
+  dout(10) << "preprocess_node_failure new: " << m->get_target() << ", from " << m->get_orig_source_inst() << dendl;
   return false;
 
  didit:
@@ -2056,6 +2083,15 @@ bool OSDMonitor::check_failures(utime_t now)
       found_failure |= check_failure(now, p->first, p->second);
     }
   }
+
+  for (map<int,failure_info_t>::iterator p = node_failure_info.begin();
+       p != node_failure_info.end();
+       ++p) {
+    auto failure = check_node_failure(now, p->first, p->second);
+    dout(1) << __func__ << " check_node_failure return " << failure << dendl;
+    found_failure |= failure;
+    dout(1) << __func__ << " current found_failure is " << found_failure <<dendl;
+  }
   return found_failure;
 }
 
@@ -2148,6 +2184,68 @@ bool OSDMonitor::check_failure(utime_t now, int target_osd, failure_info_t& fi)
   return false;
 }
 
+bool OSDMonitor::check_node_failure(utime_t now, int target_crush_id, failure_info_t& fi) {
+  set<string> reporters_by_subtree;
+  string reporter_subtree_level = g_conf->mon_osd_reporter_subtree_level;
+  utime_t grace;
+  grace.set_from_double(g_conf->mon_node_markdown_grace);
+  utime_t max_failed_since = fi.get_failed_since();
+  utime_t failed_for = now - max_failed_since;
+
+  assert(fi.reporters.size());
+  // now just simply assum there is only one client perf node,
+  // so if node_failure_info.size() > g_conf->mon_osd_min_down_reporters
+  // we'd better mark node down
+  // fix me
+  /*
+  for (map<int,failure_reporter_t>::iterator p = fi.reporters.begin();
+        p != fi.reporters.end();
+        ++p) {
+    // now just simply assum there is only one client perf node, 
+    // so if node_failure_info.size() > g_conf->mon_osd_min_down_reporters
+    // we'd better mark node down
+    // fix me
+    map<string, string> reporter_loc = osdmap.crush->get_full_location(p->first);
+    map<string, string>::iterator iter = reporter_loc.find(reporter_subtree_level);
+    if (iter == reporter_loc.end()) {
+      reporters_by_subtree.insert("node." + to_string(p->first));
+    } else {
+      reporters_by_subtree.insert(iter->second);
+    }
+  }*/
+  dout(1) << " node." << target_crush_id << " has "
+           << fi.reporters.size() << " reporters, "
+           << "grace " << grace  << ", max_failed_since " << max_failed_since
+           << dendl;
+  if (failed_for >= grace &&
+      (int)fi.reporters.size() >= g_conf->mon_osd_min_down_reporters) {
+    dout(1) << " we have enough reporters to mark node." << target_crush_id
+            << " down" << dendl;
+    set<int> osds;
+    osdmap.crush->get_children_of_type(target_crush_id, 0, &osds);
+    for (auto &osd : osds) {
+      if (pending_inc.new_state.count(osd) &&
+          pending_inc.new_state[osd] & CEPH_OSD_UP) {
+        dout(10) << " already pending failure" << dendl;
+        continue;
+      }
+      if (!can_mark_down(osd)) {
+        continue;
+      }
+      pending_inc.new_state[osd] = CEPH_OSD_UP;
+      mon->clog->info() << "osd." << osd << " failed ("
+                      << (int)reporters_by_subtree.size()
+                      << " reporters from different "
+                      << reporter_subtree_level << " after "
+                      << failed_for << " >= grace " << grace << ")";
+    }
+    force_immediate_propose();
+    dout(1) << "check_node_failure return true " <<dendl;
+    return true;
+  }
+  return false;
+}
+
 void OSDMonitor::force_failure(int target_osd, int by)
 {
   // already pending failure?
@@ -2229,6 +2327,52 @@ bool OSDMonitor::prepare_failure(MonOpRequestRef op)
   return false;
 }
 
+bool OSDMonitor::prepare_node_failure(MonOpRequestRef op) {
+  op->mark_osdmon_event(__func__);
+  MNodeFailure *m = static_cast<MNodeFailure*>(op->get_req());
+  dout(1) << "prepare_node_failure " << m->get_target()
+          << " from " << m->get_orig_source_inst()
+          << " is reporting failure:" << m->if_node_failed() << dendl;
+  int target_node = m->get_target();
+  int reporter = m->get_orig_source().num();
+  if (m->if_node_failed()) {
+    utime_t now = ceph_clock_now();
+    utime_t failed_since =
+        m->get_recv_stamp() - utime_t(m->failed_for, 0);
+    mon->clog->debug() << m->get_target() << " reported failed by "
+                      << m->get_orig_source_inst();
+    failure_info_t& fi = node_failure_info[target_node];
+    MonOpRequestRef old_op = fi.add_report(reporter, failed_since, op);
+    if (old_op) {
+      mon->no_reply(old_op);
+    }
+    return check_node_failure(now, target_node, fi);
+  } else {
+    // remove the report
+    mon->clog->debug() << m->get_target() << " failure report canceled by "
+                       << m->get_orig_source_inst();
+    if (failure_info.count(target_node)) {
+      failure_info_t& fi = node_failure_info[target_node];
+      MonOpRequestRef report_op = fi.cancel_report(reporter);
+      if (report_op) {
+        mon->no_reply(report_op);
+      }
+      if (fi.reporters.empty()) {
+        dout(10) << " removing last failure_info for node." << target_node
+                 << dendl;
+        failure_info.erase(target_node);
+      } else {
+        dout(10) << " failure_info for node." << target_node << " now "
+                 << fi.reporters.size() << " reporters" << dendl;
+      }
+    } else {
+      dout(10) << " no failure_info for node." << target_node << dendl;
+    }
+    mon->no_reply(op);
+  }
+  return false;
+}
+
 void OSDMonitor::process_failures()
 {
   map<int,failure_info_t>::iterator p = failure_info.begin();
@@ -2252,6 +2396,16 @@ void OSDMonitor::process_failures()
       }
     }
   }
+ 
+  map<int,failure_info_t>::iterator np = node_failure_info.begin();
+  while (np != node_failure_info.end()) {
+    if (osdmap.subtree_is_down(np->first, NULL)) {
+      dout(10) << "process_failures node." << np->first << dendl;
+      node_failure_info.erase(np++);
+    } else {
+      ++np;
+    }
+  }
 }
 
 void OSDMonitor::take_all_failures(list<MonOpRequestRef>& ls)
@@ -2264,6 +2418,14 @@ void OSDMonitor::take_all_failures(list<MonOpRequestRef>& ls)
     p->second.take_report_messages(ls);
   }
   failure_info.clear();
+
+  dout(10) << __func__ << " on " << node_failure_info.size() << " nodes" << dendl;
+  for (map<int,failure_info_t>::iterator p = node_failure_info.begin();
+       p != node_failure_info.end();
+       ++p) {
+    p->second.take_report_messages(ls);
+  }
+  node_failure_info.clear();
 }
 
 

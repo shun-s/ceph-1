@@ -136,6 +136,7 @@ public:
   map<int, bufferlist> pending_metadata;
   set<int>             pending_metadata_rm;
   map<int, failure_info_t> failure_info;
+  map<int, failure_info_t> node_failure_info;
   map<int,utime_t>    down_pending_out;  // osd down -> out
 
   map<int,double> osd_weight;
@@ -145,6 +146,7 @@ public:
 
   bool check_failures(utime_t now);
   bool check_failure(utime_t now, int target_osd, failure_info_t& fi);
+  bool check_node_failure(utime_t now, int target_crush_id, failure_info_t& fi);
   void force_failure(int target_osd, int by);
 
   // the time of last msg(MSG_ALIVE and MSG_PGTEMP) proposed without delay
@@ -265,7 +267,9 @@ private:
 
   friend class C_AckMarkedDown;
   bool preprocess_failure(MonOpRequestRef op);
+  bool preprocess_node_failure(MonOpRequestRef op);
   bool prepare_failure(MonOpRequestRef op);
+  bool prepare_node_failure(MonOpRequestRef op);
   bool prepare_mark_me_down(MonOpRequestRef op);
   void process_failures();
   void take_all_failures(list<MonOpRequestRef>& ls);
