@@ -1312,6 +1312,10 @@ std::vector<Option> get_global_options() {
     .set_default(2)
     .set_description(""),
 
+    Option("mon_node_min_down_reporters", Option::TYPE_INT, Option::LEVEL_ADVANCED)
+    .set_default(2)
+    .set_description(""),
+
     Option("mon_osd_reporter_subtree_level", Option::TYPE_STR, Option::LEVEL_ADVANCED)
     .set_default("host")
     .set_description(""),

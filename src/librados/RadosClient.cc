@@ -239,8 +239,8 @@ int librados::RadosClient::report_node_down(int id, double duration, unsigned ch
 {
   int err = 0;
   if (state != CONNECTED) {
-    ldout(cct, 10) << __func__ << " connecstate isn't connected" << dendl;
-    return -EAGAIN;
+    ldout(cct, 10) << __func__ << " connect state isn't connected" << dendl;
+    return -ENOTCONN;
   }
 
   err = monclient.report_node_down(id, duration, flag);

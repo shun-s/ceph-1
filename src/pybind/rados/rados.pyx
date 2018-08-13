@@ -864,10 +864,10 @@ Rados object in state %s." % self.state)
             my_outstr = outstr[:outstrlen]
             rados_buffer_free(outstr)
             return decode_cstr(my_outstr)
-  
+
     def report_node_down(self, id, duration, flag):
         """
-        flag 1 for failed, 
+        flag 1 for failed,
         flag 0 for alive
         """
         self.require_state("configuring", "connected")
@@ -879,7 +879,7 @@ Rados object in state %s." % self.state)
 
         with nogil:
             ret = rados_report_node_down(self.cluster, _id, _duration, _flag)
-       
+
         return ret
 
     def connect(self, timeout=0):
