@@ -430,6 +430,27 @@ TRACEPOINT_EVENT(librados, rados_ping_monitor_exit,
     )
 )
 
+TRACEPOINT_EVENT(librados, rados_report_node_down_enter,
+    TP_ARGS(
+        rados_t, cluster,
+        int, id,
+        unsigned char, flag),
+    TP_FIELDS(
+        ctf_integer_hex(rados_t, cluster, cluster)
+        ctf_integer(int, id, id)
+        ctf_integer(uint8_t, flag, flag)
+    )
+)
+
+TRACEPOINT_EVENT(librados, rados_report_node_down_exit,
+    TP_ARGS(
+        int, retval),
+    TP_FIELDS(
+        ctf_integer(int, retval, retval)
+    )
+)
+
+
 TRACEPOINT_EVENT(librados, rados_mon_command_enter,
     TP_ARGS(
         rados_t, cluster,
