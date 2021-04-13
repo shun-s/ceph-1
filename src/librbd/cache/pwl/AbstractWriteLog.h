@@ -123,7 +123,8 @@ public:
   void release_write_lanes(C_BlockIORequestT *req);
   virtual bool alloc_resources(C_BlockIORequestT *req) = 0;
   virtual void setup_schedule_append(
-      pwl::GenericLogOperationsVector &ops, bool do_early_flush) = 0;
+      pwl::GenericLogOperationsVector &ops, bool do_early_flush,
+      C_BlockIORequestT *req) = 0;
   void schedule_append(pwl::GenericLogOperationsVector &ops);
   void schedule_append(pwl::GenericLogOperationSharedPtr op);
   void flush_new_sync_point(C_FlushRequestT *flush_req,
@@ -392,6 +393,10 @@ protected:
       const std::shared_ptr<pwl::GenericLogEntry> log_entry) {
     return nullptr;
   }
+  virtual uint64_t get_max_extent() {
+    return 0;
+  }
+
 };
 
 } // namespace pwl

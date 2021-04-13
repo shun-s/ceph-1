@@ -1,10 +1,13 @@
+import errno
 import logging
 import os
-from typing import List, Any, Tuple, Dict
+from typing import List, Any, Tuple, Dict, Optional, cast
+
+from mgr_module import HandleCommandResult
 
 from orchestrator import DaemonDescription
 from ceph.deployment.service_spec import AlertManagerSpec
-from cephadm.services.cephadmservice import CephadmService, CephadmDaemonSpec
+from cephadm.services.cephadmservice import CephadmService, CephadmDaemonDeploySpec
 from mgr_util import verify_tls, ServerConfigException, create_self_signed_cert
 
 logger = logging.getLogger(__name__)
@@ -14,11 +17,12 @@ class GrafanaService(CephadmService):
     TYPE = 'grafana'
     DEFAULT_SERVICE_PORT = 3000
 
-    def prepare_create(self, daemon_spec: CephadmDaemonSpec) -> CephadmDaemonSpec:
+    def prepare_create(self, daemon_spec: CephadmDaemonDeploySpec) -> CephadmDaemonDeploySpec:
         assert self.TYPE == daemon_spec.daemon_type
+        daemon_spec.final_config, daemon_spec.deps = self.generate_config(daemon_spec)
         return daemon_spec
 
-    def generate_config(self, daemon_spec: CephadmDaemonSpec) -> Tuple[Dict[str, Any], List[str]]:
+    def generate_config(self, daemon_spec: CephadmDaemonDeploySpec) -> Tuple[Dict[str, Any], List[str]]:
         assert self.TYPE == daemon_spec.daemon_type
         deps = []  # type: List[str]
 
@@ -80,26 +84,35 @@ class GrafanaService(CephadmService):
             service_url
         )
 
+    def ok_to_stop(self,
+                   daemon_ids: List[str],
+                   force: bool = False,
+                   known: Optional[List[str]] = None) -> HandleCommandResult:
+        warn, warn_message = self._enough_daemons_to_stop(self.TYPE, daemon_ids, 'Grafana', 1)
+        if warn and not force:
+            return HandleCommandResult(-errno.EBUSY, '', warn_message)
+        return HandleCommandResult(0, warn_message, '')
+
 
 class AlertmanagerService(CephadmService):
     TYPE = 'alertmanager'
     DEFAULT_SERVICE_PORT = 9093
 
-    def prepare_create(self, daemon_spec: CephadmDaemonSpec[AlertManagerSpec]) -> CephadmDaemonSpec:
+    def prepare_create(self, daemon_spec: CephadmDaemonDeploySpec) -> CephadmDaemonDeploySpec:
         assert self.TYPE == daemon_spec.daemon_type
-        assert daemon_spec.spec
+        daemon_spec.final_config, daemon_spec.deps = self.generate_config(daemon_spec)
         return daemon_spec
 
-    def generate_config(self, daemon_spec: CephadmDaemonSpec[AlertManagerSpec]) -> Tuple[Dict[str, Any], List[str]]:
+    def generate_config(self, daemon_spec: CephadmDaemonDeploySpec) -> Tuple[Dict[str, Any], List[str]]:
         assert self.TYPE == daemon_spec.daemon_type
         deps: List[str] = []
         default_webhook_urls: List[str] = []
 
-        if daemon_spec.spec:
-            user_data = daemon_spec.spec.user_data
-            if 'default_webhook_urls' in user_data and isinstance(
-                    user_data['default_webhook_urls'], list):
-                default_webhook_urls.extend(user_data['default_webhook_urls'])
+        spec = cast(AlertManagerSpec, self.mgr.spec_store[daemon_spec.service_name].spec)
+        user_data = spec.user_data
+        if 'default_webhook_urls' in user_data and isinstance(
+                user_data['default_webhook_urls'], list):
+            default_webhook_urls.extend(user_data['default_webhook_urls'])
 
         # dashboard(s)
         dashboard_urls: List[str] = []
@@ -165,16 +178,26 @@ class AlertmanagerService(CephadmService):
             service_url
         )
 
+    def ok_to_stop(self,
+                   daemon_ids: List[str],
+                   force: bool = False,
+                   known: Optional[List[str]] = None) -> HandleCommandResult:
+        warn, warn_message = self._enough_daemons_to_stop(self.TYPE, daemon_ids, 'Alertmanager', 1)
+        if warn and not force:
+            return HandleCommandResult(-errno.EBUSY, '', warn_message)
+        return HandleCommandResult(0, warn_message, '')
+
 
 class PrometheusService(CephadmService):
     TYPE = 'prometheus'
     DEFAULT_SERVICE_PORT = 9095
 
-    def prepare_create(self, daemon_spec: CephadmDaemonSpec) -> CephadmDaemonSpec:
+    def prepare_create(self, daemon_spec: CephadmDaemonDeploySpec) -> CephadmDaemonDeploySpec:
         assert self.TYPE == daemon_spec.daemon_type
+        daemon_spec.final_config, daemon_spec.deps = self.generate_config(daemon_spec)
         return daemon_spec
 
-    def generate_config(self, daemon_spec: CephadmDaemonSpec) -> Tuple[Dict[str, Any], List[str]]:
+    def generate_config(self, daemon_spec: CephadmDaemonDeploySpec) -> Tuple[Dict[str, Any], List[str]]:
         assert self.TYPE == daemon_spec.daemon_type
         deps = []  # type: List[str]
 
@@ -263,14 +286,33 @@ class PrometheusService(CephadmService):
             service_url
         )
 
+    def ok_to_stop(self,
+                   daemon_ids: List[str],
+                   force: bool = False,
+                   known: Optional[List[str]] = None) -> HandleCommandResult:
+        warn, warn_message = self._enough_daemons_to_stop(self.TYPE, daemon_ids, 'Prometheus', 1)
+        if warn and not force:
+            return HandleCommandResult(-errno.EBUSY, '', warn_message)
+        return HandleCommandResult(0, warn_message, '')
+
 
 class NodeExporterService(CephadmService):
     TYPE = 'node-exporter'
 
-    def prepare_create(self, daemon_spec: CephadmDaemonSpec) -> CephadmDaemonSpec:
+    def prepare_create(self, daemon_spec: CephadmDaemonDeploySpec) -> CephadmDaemonDeploySpec:
         assert self.TYPE == daemon_spec.daemon_type
+        daemon_spec.final_config, daemon_spec.deps = self.generate_config(daemon_spec)
         return daemon_spec
 
-    def generate_config(self, daemon_spec: CephadmDaemonSpec) -> Tuple[Dict[str, Any], List[str]]:
+    def generate_config(self, daemon_spec: CephadmDaemonDeploySpec) -> Tuple[Dict[str, Any], List[str]]:
         assert self.TYPE == daemon_spec.daemon_type
         return {}, []
+
+    def ok_to_stop(self,
+                   daemon_ids: List[str],
+                   force: bool = False,
+                   known: Optional[List[str]] = None) -> HandleCommandResult:
+        # since node exporter runs on each host and cannot compromise data, no extra checks required
+        names = [f'{self.TYPE}.{d_id}' for d_id in daemon_ids]
+        out = f'It is presumed safe to stop {names}'
+        return HandleCommandResult(0, out, '')

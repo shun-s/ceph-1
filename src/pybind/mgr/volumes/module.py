@@ -1,5 +1,4 @@
 import errno
-import json
 import logging
 import traceback
 import threading
@@ -147,6 +146,15 @@ class Module(orchestrator.OrchestratorClientMixin, MgrModule):
                    'name=group_name,type=CephString,req=false ',
             'desc': "List auth IDs that have access to a subvolume",
             'perm': 'r'
+        },
+        {
+            'cmd': 'fs subvolume evict '
+                   'name=vol_name,type=CephString '
+                   'name=sub_name,type=CephString '
+                   'name=auth_id,type=CephString '
+                   'name=group_name,type=CephString,req=false ',
+            'desc': "Evict clients based on auth IDs and subvolume mounted",
+            'perm': 'rw'
         },
         {
             'cmd': 'fs subvolumegroup getpath '
@@ -343,6 +351,11 @@ class Module(orchestrator.OrchestratorClientMixin, MgrModule):
                    'name=binding,type=CephString ',
             'desc': "Fetch a export of a NFS cluster given the pseudo path/binding",
             'perm': 'r'
+        },
+        {
+            'cmd': 'nfs export update ',
+            'desc': "Update an export of a NFS cluster by `-i <json_file>`",
+            'perm': 'rw'
         },
         {
             'cmd': 'nfs cluster create '
@@ -556,6 +569,16 @@ class Module(orchestrator.OrchestratorClientMixin, MgrModule):
                                        group_name=cmd.get('group_name', None))
 
     @mgr_cmd_wrap
+    def _cmd_fs_subvolume_evict(self, inbuf, cmd):
+        """
+        :return: a 3-tuple of return code(int), empyt string(str), error message (str)
+        """
+        return self.vc.evict(vol_name=cmd['vol_name'],
+                             sub_name=cmd['sub_name'],
+                             auth_id=cmd['auth_id'],
+                             group_name=cmd.get('group_name', None))
+
+    @mgr_cmd_wrap
     def _cmd_fs_subvolume_ls(self, inbuf, cmd):
         return self.vc.list_subvolumes(vol_name=cmd['vol_name'],
                                        group_name=cmd.get('group_name', None))
@@ -686,6 +709,11 @@ class Module(orchestrator.OrchestratorClientMixin, MgrModule):
     @mgr_cmd_wrap
     def _cmd_nfs_export_get(self, inbuf, cmd):
         return self.fs_export.get_export(cluster_id=cmd['clusterid'], pseudo_path=cmd['binding'])
+
+    @mgr_cmd_wrap
+    def _cmd_nfs_export_update(self, inbuf, cmd):
+        # The export <json_file> is passed to -i and it's processing is handled by the Ceph CLI.
+        return self.fs_export.update_export(export_config=inbuf)
 
     @mgr_cmd_wrap
     def _cmd_nfs_cluster_create(self, inbuf, cmd):

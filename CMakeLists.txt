@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.10.2)
 # remove cmake/modules/FindPython* once 3.12 is required
 
 project(ceph
-  VERSION 16.0.0
+  VERSION 17.0.0
   LANGUAGES CXX C ASM)
 
 foreach(policy
@@ -42,20 +42,30 @@ endif()
 if(MINGW)
   set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-allow-multiple-definition")
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-allow-multiple-definition")
+
+  # By default, cmake generates import libs for executables. The issue is that
+  # for rados and rbd, the executable import lib overrides the library import lib.
+  # For example, for rados.exe, it will end up generating a librados.dll.a import lib.
+  # We're providing custom rules to disable import libs for executables.
+  set(CMAKE_C_LINK_EXECUTABLE
+    "<CMAKE_C_COMPILER> <FLAGS> <CMAKE_C_LINK_FLAGS> <LINK_FLAGS> <OBJECTS> -o <TARGET> ${CMAKE_GNULD_IMAGE_VERSION} <LINK_LIBRARIES>")
+  set(CMAKE_CXX_LINK_EXECUTABLE
+    "<CMAKE_CXX_COMPILER> <FLAGS> <CMAKE_CXX_LINK_FLAGS> <LINK_FLAGS> <OBJECTS> -o <TARGET> ${CMAKE_GNULD_IMAGE_VERSION} <LINK_LIBRARIES>")
+
 endif()
 
 option(WITH_CCACHE "Build with ccache.")
 if(WITH_CCACHE)
-  find_program(CCACHE_FOUND ccache)
-  if(NOT CCACHE_FOUND)
+  find_program(CCACHE_EXECUTABLE ccache)
+  if(NOT CCACHE_EXECUTABLE)
     message(FATAL_ERROR "Can't find ccache. Is it installed?")
   endif()
-  message(STATUS "Building with ccache: ${CCACHE_FOUND}, CCACHE_DIR=$ENV{CCACHE_DIR}")
-  set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE ccache)
+  message(STATUS "Building with ccache: ${CCACHE_EXECUTABLE}, CCACHE_DIR=$ENV{CCACHE_DIR}")
+  set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE "${CCACHE_EXECUTABLE}")
   # ccache does not accelerate link (ld), but let it handle it. by passing it
   # along with cc to python's distutils, we are able to workaround
   # https://bugs.python.org/issue8027.
-  set_property(GLOBAL PROPERTY RULE_LAUNCH_LINK ccache)
+  set_property(GLOBAL PROPERTY RULE_LAUNCH_LINK "${CCACHE_EXECUTABLE}")
 endif(WITH_CCACHE)
 
 option(WITH_MANPAGE "Build man pages." ON)
@@ -171,6 +181,8 @@ if(WITH_FUSE)
   set(HAVE_LIBFUSE ${FUSE_FOUND})
 endif()
 
+option(WITH_DOKAN "Dokan is here" OFF)
+
 option(WITH_XFS "XFS is here" ON)
 if(WITH_XFS)
   find_package(xfs)
@@ -222,6 +234,10 @@ CMAKE_DEPENDENT_OPTION(WITH_SYSTEM_LIBURING "Require and build with system libur
 CMAKE_DEPENDENT_OPTION(WITH_BLUESTORE_PMEM "Enable PMDK libraries" OFF
   "WITH_BLUESTORE" OFF)
 
+CMAKE_DEPENDENT_OPTION(WITH_RBD_MIGRATION_FORMAT_QCOW_V1
+  "Enable librbd QCOW v1 migration format support" ON
+  "WITH_RBD" OFF)
+
 CMAKE_DEPENDENT_OPTION(WITH_RBD_RWL "Enable librbd persistent write back cache" OFF
   "WITH_RBD" OFF)
 
@@ -265,6 +281,11 @@ endif(WITH_QATZIP)
 # needs mds and? XXX
 option(WITH_LIBCEPHFS "libcephfs client library" ON)
 
+option(WITH_LIBCEPHSQLITE "libcephsqlite client library" ON)
+if(WITH_LIBCEPHSQLITE)
+  find_package(SQLite3 REQUIRED)
+endif()
+
 # key-value store
 option(WITH_KVS "Key value store is here" ON)
 
@@ -304,7 +325,8 @@ if(WITH_LZ4)
   set(HAVE_LZ4 ${LZ4_FOUND})
 endif(WITH_LZ4)
 
-option(WITH_CEPH_DEBUG_MUTEX "Use debug ceph::mutex with lockdep" OFF)
+CMAKE_DEPENDENT_OPTION(WITH_CEPH_DEBUG_MUTEX "Use debug ceph::mutex with lockdep" ON
+  "CMAKE_BUILD_TYPE STREQUAL Debug" OFF)
 
 #if allocator is set on command line make sure it matches below strings
 set(ALLOCATOR "" CACHE STRING
@@ -340,7 +362,8 @@ else(ALLOCATOR)
   endif(gperftools_FOUND)
 endif(ALLOCATOR)
 
-if(HAVE_LIBTCMALLOC AND WITH_STATIC_LIBSTDCXX)
+# Mingw generates incorrect entry points when using "-pie".
+if(WIN32 OR (HAVE_LIBTCMALLOC AND WITH_STATIC_LIBSTDCXX))
   set(EXE_LINKER_USE_PIE FALSE)
 else()
   set(EXE_LINKER_USE_PIE ${ENABLE_SHARED})
@@ -464,11 +487,6 @@ if(WITH_MGR)
   set(MGR_PYTHON_LIBRARIES ${Python3_LIBRARIES})
   set(MGR_PYTHON_VERSION_MAJOR ${Python3_VERSION_MAJOR})
   set(MGR_PYTHON_VERSION_MINOR ${Python3_VERSION_MINOR})
-  # https://tracker.ceph.com/issues/45147
-  if(Python3_VERSION VERSION_GREATER_EQUAL 3.8)
-    set(MGR_DISABLED_MODULES "diskprediction_local")
-    message(STATUS "mgr module disabled for ${Python3_VERSION}: ${MGR_DISABLED_MODULES}")
-  endif()
   # Boost dependency check deferred to Boost section
 endif(WITH_MGR)
 endif(NOT WIN32)
@@ -604,7 +622,7 @@ if(WITH_SYSTEM_BOOST)
   if(BOOST_ROOT AND CMAKE_LIBRARY_ARCHITECTURE)
     set(BOOST_LIBRARYDIR "${BOOST_ROOT}/lib/${CMAKE_LIBRARY_ARCHITECTURE}")
   endif()
-  find_package(Boost 1.72 COMPONENTS ${BOOST_COMPONENTS} REQUIRED)
+  find_package(Boost 1.73 COMPONENTS ${BOOST_COMPONENTS} REQUIRED)
   if(NOT ENABLE_SHARED)
     set_property(TARGET Boost::iostreams APPEND PROPERTY
       INTERFACE_LINK_LIBRARIES ZLIB::ZLIB)
@@ -614,7 +632,7 @@ else()
     "max jobs for Boost build") # override w/-DBOOST_J=<n>
   set(Boost_USE_STATIC_LIBS ON)
   include(BuildBoost)
-  build_boost(1.72
+  build_boost(1.75
     COMPONENTS ${BOOST_COMPONENTS} ${BOOST_HEADER_COMPONENTS})
 endif()
 include_directories(BEFORE SYSTEM ${Boost_INCLUDE_DIRS})
@@ -659,6 +677,8 @@ add_custom_target(check
   COMMAND ${CMAKE_CTEST_COMMAND}
   DEPENDS tests)
 
+option(WITH_SYSTEMD "build with systemd support" ON)
+
 add_subdirectory(src)
 
 add_subdirectory(qa)
@@ -668,7 +688,6 @@ if(WITH_MANPAGE)
   add_subdirectory(man)
 endif(WITH_MANPAGE)
 
-option(WITH_SYSTEMD "install systemd target and service files" ON)
 if(WITH_SYSTEMD)
   add_subdirectory(systemd)
 endif()

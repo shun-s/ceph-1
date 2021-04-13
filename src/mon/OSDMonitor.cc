@@ -27,7 +27,7 @@
 #include "mon/MDSMonitor.h"
 #include "mon/MgrStatMonitor.h"
 #include "mon/AuthMonitor.h"
-#include "mon/ConfigKeyService.h"
+#include "mon/KVMonitor.h"
 
 #include "mon/MonitorDBStore.h"
 #include "mon/Session.h"
@@ -660,26 +660,23 @@ void OSDMonitor::create_initial()
   if (newmap.nearfull_ratio > 1.0) newmap.nearfull_ratio /= 100;
 
   // new cluster should require latest by default
-  if (g_conf().get_val<bool>("mon_debug_no_require_pacific")) {
-    if (g_conf().get_val<bool>("mon_debug_no_require_octopus")) {
-      derr << __func__ << " mon_debug_no_require_pacific and octopus=true" << dendl;
+  if (g_conf().get_val<bool>("mon_debug_no_require_quincy")) {
+    if (g_conf().get_val<bool>("mon_debug_no_require_pacific")) {
+      derr << __func__ << " mon_debug_no_require_quincy and pacific=true" << dendl;
       newmap.require_osd_release = ceph_release_t::nautilus;
     } else {
-      derr << __func__ << " mon_debug_no_require_pacific=true" << dendl;
-      newmap.require_osd_release = ceph_release_t::octopus;
+      derr << __func__ << " mon_debug_no_require_quincy=true" << dendl;
+      newmap.require_osd_release = ceph_release_t::pacific;
     }
   } else {
-    newmap.require_osd_release = ceph_release_t::pacific;
+    newmap.require_osd_release = ceph_release_t::quincy;
   }
 
-  if (newmap.require_osd_release >= ceph_release_t::octopus) {
-    ceph_release_t r = ceph_release_from_name(
-      g_conf()->mon_osd_initial_require_min_compat_client);
-    if (!r) {
-      ceph_abort_msg("mon_osd_initial_require_min_compat_client is not valid");
-    }
-    newmap.require_min_compat_client = r;
+  ceph_release_t r = ceph_release_from_name(g_conf()->mon_osd_initial_require_min_compat_client);
+  if (!r) {
+    ceph_abort_msg("mon_osd_initial_require_min_compat_client is not valid");
   }
+  newmap.require_min_compat_client = r;
 
   // encode into pending incremental
   uint64_t features = newmap.get_encoding_features();
@@ -1425,7 +1422,7 @@ void OSDMonitor::maybe_prime_pg_temp()
   for (auto p = pending_inc.new_weight.begin();
        !all && p != pending_inc.new_weight.end();
        ++p) {
-    if (p->second < osdmap.get_weight(p->first)) {
+    if (osdmap.exists(p->first) && p->second < osdmap.get_weight(p->first)) {
       // weight reduction
       osds.insert(p->first);
     } else {
@@ -1567,7 +1564,7 @@ void OSDMonitor::encode_pending(MonitorDBStore::TransactionRef t)
   // finalize up pending_inc
   pending_inc.modified = ceph_clock_now();
 
-  int r = pending_inc.propagate_snaps_to_tiers(cct, osdmap);
+  int r = pending_inc.propagate_base_properties_to_tiers(cct, osdmap);
   ceph_assert(r == 0);
 
   if (mapping_job) {
@@ -3179,14 +3176,69 @@ bool OSDMonitor::can_mark_in(int i)
 bool OSDMonitor::check_failures(utime_t now)
 {
   bool found_failure = false;
-  for (map<int,failure_info_t>::iterator p = failure_info.begin();
-       p != failure_info.end();
-       ++p) {
-    if (can_mark_down(p->first)) {
-      found_failure |= check_failure(now, p->first, p->second);
+  auto p = failure_info.begin();
+  while (p != failure_info.end()) {
+    auto& [target_osd, fi] = *p;
+    if (can_mark_down(target_osd)) {
+      found_failure |= check_failure(now, target_osd, fi);
+      ++p;
+    } else if (is_failure_stale(now, fi)) {
+      dout(10) << " dropping stale failure_info for osd." << target_osd
+	       << " from " << fi.reporters.size() << " reporters"
+	       << dendl;
+      p = failure_info.erase(p);
+    } else {
+      ++p;
     }
   }
   return found_failure;
+}
+
+utime_t OSDMonitor::get_grace_time(utime_t now,
+				   int target_osd,
+				   failure_info_t& fi) const
+{
+  utime_t orig_grace(g_conf()->osd_heartbeat_grace, 0);
+  if (!g_conf()->mon_osd_adjust_heartbeat_grace) {
+    return orig_grace;
+  }
+  utime_t grace = orig_grace;
+  double halflife = (double)g_conf()->mon_osd_laggy_halflife;
+  double decay_k = ::log(.5) / halflife;
+
+  // scale grace period based on historical probability of 'lagginess'
+  // (false positive failures due to slowness).
+  const osd_xinfo_t& xi = osdmap.get_xinfo(target_osd);
+  const utime_t failed_for = now - fi.get_failed_since();
+  double decay = exp((double)failed_for * decay_k);
+  dout(20) << " halflife " << halflife << " decay_k " << decay_k
+	   << " failed_for " << failed_for << " decay " << decay << dendl;
+  double my_grace = decay * (double)xi.laggy_interval * xi.laggy_probability;
+  grace += my_grace;
+
+  // consider the peers reporting a failure a proxy for a potential
+  // 'subcluster' over the overall cluster that is similarly
+  // laggy.  this is clearly not true in all cases, but will sometimes
+  // help us localize the grace correction to a subset of the system
+  // (say, a rack with a bad switch) that is unhappy.
+  double peer_grace = 0;
+  for (auto& [reporter, report] : fi.reporters) {
+    if (osdmap.exists(reporter)) {
+      const osd_xinfo_t& xi = osdmap.get_xinfo(reporter);
+      utime_t elapsed = now - xi.down_stamp;
+      double decay = exp((double)elapsed * decay_k);
+      peer_grace += decay * (double)xi.laggy_interval * xi.laggy_probability;
+    }
+  }
+  peer_grace /= (double)fi.reporters.size();
+  grace += peer_grace;
+  dout(10) << " osd." << target_osd << " has "
+	   << fi.reporters.size() << " reporters, "
+	   << grace << " grace (" << orig_grace << " + " << my_grace
+	   << " + " << peer_grace << "), max_failed_since " << fi.get_failed_since()
+	   << dendl;
+
+  return grace;
 }
 
 bool OSDMonitor::check_failure(utime_t now, int target_osd, failure_info_t& fi)
@@ -3200,32 +3252,6 @@ bool OSDMonitor::check_failure(utime_t now, int target_osd, failure_info_t& fi)
 
   set<string> reporters_by_subtree;
   auto reporter_subtree_level = g_conf().get_val<string>("mon_osd_reporter_subtree_level");
-  utime_t orig_grace(g_conf()->osd_heartbeat_grace, 0);
-  utime_t max_failed_since = fi.get_failed_since();
-  utime_t failed_for = now - max_failed_since;
-
-  utime_t grace = orig_grace;
-  double my_grace = 0, peer_grace = 0;
-  double decay_k = 0;
-  if (g_conf()->mon_osd_adjust_heartbeat_grace) {
-    double halflife = (double)g_conf()->mon_osd_laggy_halflife;
-    decay_k = ::log(.5) / halflife;
-
-    // scale grace period based on historical probability of 'lagginess'
-    // (false positive failures due to slowness).
-    const osd_xinfo_t& xi = osdmap.get_xinfo(target_osd);
-    double decay = exp((double)failed_for * decay_k);
-    dout(20) << " halflife " << halflife << " decay_k " << decay_k
-	     << " failed_for " << failed_for << " decay " << decay << dendl;
-    my_grace = decay * (double)xi.laggy_interval * xi.laggy_probability;
-    grace += my_grace;
-  }
-
-  // consider the peers reporting a failure a proxy for a potential
-  // 'subcluster' over the overall cluster that is similarly
-  // laggy.  this is clearly not true in all cases, but will sometimes
-  // help us localize the grace correction to a subset of the system
-  // (say, a rack with a bad switch) that is unhappy.
   ceph_assert(fi.reporters.size());
   for (auto p = fi.reporters.begin(); p != fi.reporters.end();) {
     // get the parent bucket whose type matches with "reporter_subtree_level".
@@ -3238,32 +3264,18 @@ bool OSDMonitor::check_failure(utime_t now, int target_osd, failure_info_t& fi)
       } else {
         reporters_by_subtree.insert(iter->second);
       }
-      if (g_conf()->mon_osd_adjust_heartbeat_grace) {
-        const osd_xinfo_t& xi = osdmap.get_xinfo(p->first);
-        utime_t elapsed = now - xi.down_stamp;
-        double decay = exp((double)elapsed * decay_k);
-        peer_grace += decay * (double)xi.laggy_interval * xi.laggy_probability;
-      }
       ++p;
     } else {
       fi.cancel_report(p->first);;
       p = fi.reporters.erase(p);
     }
   }
-  
-  if (g_conf()->mon_osd_adjust_heartbeat_grace) {
-    peer_grace /= (double)fi.reporters.size();
-    grace += peer_grace;
+  if (reporters_by_subtree.size() < g_conf().get_val<uint64_t>("mon_osd_min_down_reporters")) {
+    return false;
   }
-
-  dout(10) << " osd." << target_osd << " has "
-	   << fi.reporters.size() << " reporters, "
-	   << grace << " grace (" << orig_grace << " + " << my_grace
-	   << " + " << peer_grace << "), max_failed_since " << max_failed_since
-	   << dendl;
-
-  if (failed_for >= grace &&
-      reporters_by_subtree.size() >= g_conf().get_val<uint64_t>("mon_osd_min_down_reporters")) {
+  const utime_t failed_for = now - fi.get_failed_since();
+  const utime_t grace = get_grace_time(now, target_osd, fi);
+  if (failed_for >= grace) {
     dout(1) << " we have enough reporters to mark osd." << target_osd
 	    << " down" << dendl;
     pending_inc.new_state[target_osd] = CEPH_OSD_UP;
@@ -3279,6 +3291,17 @@ bool OSDMonitor::check_failure(utime_t now, int target_osd, failure_info_t& fi)
     return true;
   }
   return false;
+}
+
+bool OSDMonitor::is_failure_stale(utime_t now, failure_info_t& fi) const
+{
+  // if it takes too long to either cancel the report to mark the osd down,
+  // some reporters must have failed to cancel their reports. let's just
+  // forget these reports.
+  const utime_t failed_for = now - fi.get_failed_since();
+  auto heartbeat_grace = cct->_conf.get_val<int64_t>("osd_heartbeat_grace");
+  auto heartbeat_stale = cct->_conf.get_val<int64_t>("osd_heartbeat_stale");
+  return failed_for >= (heartbeat_grace + heartbeat_stale);
 }
 
 void OSDMonitor::force_failure(int target_osd, int by)
@@ -3337,11 +3360,7 @@ bool OSDMonitor::prepare_failure(MonOpRequestRef op)
 		      << m->get_orig_source();
 
     failure_info_t& fi = failure_info[target_osd];
-    MonOpRequestRef old_op = fi.add_report(reporter, failed_since, op);
-    if (old_op) {
-      mon.no_reply(old_op);
-    }
-
+    fi.add_report(reporter, failed_since, op);
     return check_failure(now, target_osd, fi);
   } else {
     // remove the report
@@ -3350,10 +3369,7 @@ bool OSDMonitor::prepare_failure(MonOpRequestRef op)
 		       << m->get_orig_source();
     if (failure_info.count(target_osd)) {
       failure_info_t& fi = failure_info[target_osd];
-      MonOpRequestRef report_op = fi.cancel_report(reporter);
-      if (report_op) {
-        mon.no_reply(report_op);
-      }
+      fi.cancel_report(reporter);
       if (fi.reporters.empty()) {
 	dout(10) << " removing last failure_info for osd." << target_osd
 		 << dendl;
@@ -3473,43 +3489,15 @@ bool OSDMonitor::preprocess_boot(MonOpRequestRef op)
 
   ceph_assert(m->get_orig_source_inst().name.is_osd());
 
-  // force all osds to have gone through luminous prior to upgrade to nautilus
-  {
-    vector<string> missing;
-    if (!HAVE_FEATURE(m->osd_features, SERVER_LUMINOUS)) {
-      missing.push_back("CEPH_FEATURE_SERVER_LUMINOUS");
-    }
-    if (!HAVE_FEATURE(m->osd_features, SERVER_JEWEL)) {
-      missing.push_back("CEPH_FEATURE_SERVER_JEWEL");
-    }
-    if (!HAVE_FEATURE(m->osd_features, SERVER_KRAKEN)) {
-      missing.push_back("CEPH_FEATURE_SERVER_KRAKEN");
-    }
-    if (!HAVE_FEATURE(m->osd_features, OSD_RECOVERY_DELETES)) {
-      missing.push_back("CEPH_FEATURE_OSD_RECOVERY_DELETES");
-    }
-
-    if (!missing.empty()) {
-      using std::experimental::make_ostream_joiner;
-
-      stringstream ss;
-      copy(begin(missing), end(missing), make_ostream_joiner(ss, ";"));
-
-      mon.clog->info() << "disallowing boot of OSD "
-			<< m->get_orig_source_inst()
-			<< " because the osd lacks " << ss.str();
-      goto ignore;
-    }
+  // lower bound of N-2
+  if (!HAVE_FEATURE(m->osd_features, SERVER_OCTOPUS)) {
+    mon.clog->info() << "disallowing boot of OSD "
+		     << m->get_orig_source_inst()
+		     << " because the osd lacks CEPH_FEATURE_SERVER_OCTOPUS";
+    goto ignore;
   }
 
   // make sure osd versions do not span more than 3 releases
-  if (HAVE_FEATURE(m->osd_features, SERVER_OCTOPUS) &&
-      osdmap.require_osd_release < ceph_release_t::mimic) {
-    mon.clog->info() << "disallowing boot of octopus+ OSD "
-		      << m->get_orig_source_inst()
-		      << " because require_osd_release < mimic";
-    goto ignore;
-  }
   if (HAVE_FEATURE(m->osd_features, SERVER_PACIFIC) &&
       osdmap.require_osd_release < ceph_release_t::nautilus) {
     mon.clog->info() << "disallowing boot of pacific+ OSD "
@@ -3517,15 +3505,11 @@ bool OSDMonitor::preprocess_boot(MonOpRequestRef op)
 		      << " because require_osd_release < nautilus";
     goto ignore;
   }
-
-  // The release check here is required because for OSD_PGLOG_HARDLIMIT,
-  // we are reusing a jewel feature bit that was retired in luminous.
-  if (osdmap.require_osd_release >= ceph_release_t::luminous &&
-      osdmap.test_flag(CEPH_OSDMAP_PGLOG_HARDLIMIT) &&
-      !(m->osd_features & CEPH_FEATURE_OSD_PGLOG_HARDLIMIT)) {
-    mon.clog->info() << "disallowing boot of OSD "
+  if (HAVE_FEATURE(m->osd_features, SERVER_QUINCY) &&
+      osdmap.require_osd_release < ceph_release_t::octopus) {
+    mon.clog->info() << "disallowing boot of quincy+ OSD "
 		      << m->get_orig_source_inst()
-		      << " because 'pglog_hardlimit' osdmap flag is set and OSD lacks the OSD_PGLOG_HARDLIMIT feature";
+		      << " because require_osd_release < octopus";
     goto ignore;
   }
 
@@ -9080,7 +9064,6 @@ void OSDMonitor::do_osd_create(
   if (existing_id >= 0) {
     ceph_assert(existing_id < osdmap.get_max_osd());
     ceph_assert(allocated_id < 0);
-    pending_inc.new_weight[existing_id] = CEPH_OSD_OUT;
     *new_id = existing_id;
   } else if (allocated_id >= 0) {
     ceph_assert(existing_id < 0);
@@ -9129,7 +9112,10 @@ out:
     pending_inc.new_max_osd = *new_id + 1;
   }
 
-  pending_inc.new_state[*new_id] |= CEPH_OSD_EXISTS | CEPH_OSD_NEW;
+  pending_inc.new_weight[*new_id] = CEPH_OSD_IN;
+  // do not set EXISTS; OSDMap::set_weight, called by apply_incremental, will
+  // set it for us.  (ugh.)
+  pending_inc.new_state[*new_id] |= CEPH_OSD_NEW;
   if (!uuid.is_zero())
     pending_inc.new_uuid[*new_id] = uuid;
 }
@@ -9364,7 +9350,7 @@ int OSDMonitor::prepare_command_osd_new(
     || params.count("cephx_lockbox_secret")
     || params.count("dmcrypt_key");
 
-  ConfigKeyService *svc = nullptr;
+  KVMonitor *svc = nullptr;
   AuthMonitor::auth_entity_t cephx_entity, lockbox_entity;
 
   if (has_secrets) {
@@ -9408,7 +9394,7 @@ int OSDMonitor::prepare_command_osd_new(
     }
 
     if (has_lockbox) {
-      svc = mon.config_key_service.get();
+      svc = mon.kvmon();
       err = svc->validate_osd_new(uuid, dmcrypt_key, ss);
       if (err < 0) {
         return err;
@@ -9460,7 +9446,6 @@ int OSDMonitor::prepare_command_osd_new(
   if (is_recreate_destroyed) {
     ceph_assert(id >= 0);
     ceph_assert(osdmap.is_destroyed(id));
-    pending_inc.new_weight[id] = CEPH_OSD_OUT;
     pending_inc.new_state[id] |= CEPH_OSD_DESTROYED;
     if ((osdmap.get_state(id) & CEPH_OSD_NEW) == 0) {
       pending_inc.new_state[id] |= CEPH_OSD_NEW;
@@ -9593,7 +9578,7 @@ int OSDMonitor::prepare_command_osd_destroy(
     }
   }
 
-  auto svc = mon.config_key_service.get();
+  auto svc = mon.kvmon();
   err = svc->validate_osd_destroy(id, uuid);
   if (err < 0) {
     ceph_assert(err == -ENOENT);
@@ -9931,16 +9916,14 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
       }
     }
 
-    if (!updated.empty()) {
-      pending_inc.crush.clear();
-      newcrush.encode(pending_inc.crush, mon.get_quorum_con_features());
-      ss << "set osd(s) " << updated << " to class '" << device_class << "'";
-      getline(ss, rs);
-      wait_for_finished_proposal(op,
-        new Monitor::C_Command(mon,op, 0, rs, get_last_committed() + 1));
-      return true;
-    }
-
+    pending_inc.crush.clear();
+    newcrush.encode(pending_inc.crush, mon.get_quorum_con_features());
+    ss << "set osd(s) " << updated << " to class '" << device_class << "'";
+    getline(ss, rs);
+    wait_for_finished_proposal(
+      op,
+      new Monitor::C_Command(mon,op, 0, rs, get_last_committed() + 1));
+    return true;
  } else if (prefix == "osd crush rm-device-class") {
     bool stop = false;
     vector<string> idvec;
@@ -9993,15 +9976,14 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
       }
     }
 
-    if (!updated.empty()) {
-      pending_inc.crush.clear();
-      newcrush.encode(pending_inc.crush, mon.get_quorum_con_features());
-      ss << "done removing class of osd(s): " << updated;
-      getline(ss, rs);
-      wait_for_finished_proposal(op,
-        new Monitor::C_Command(mon,op, 0, rs, get_last_committed() + 1));
-      return true;
-    }
+    pending_inc.crush.clear();
+    newcrush.encode(pending_inc.crush, mon.get_quorum_con_features());
+    ss << "done removing class of osd(s): " << updated;
+    getline(ss, rs);
+    wait_for_finished_proposal(
+      op,
+      new Monitor::C_Command(mon,op, 0, rs, get_last_committed() + 1));
+    return true;
   } else if (prefix == "osd crush class create") {
     string device_class;
     if (!cmd_getval(cmdmap, "class", device_class)) {
@@ -11429,40 +11411,14 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
       err = 0;
       goto reply;
     }
-    ceph_assert(osdmap.require_osd_release >= ceph_release_t::luminous);
+    ceph_assert(osdmap.require_osd_release >= ceph_release_t::octopus);
     if (!osdmap.get_num_up_osds() && !sure) {
       ss << "Not advisable to continue since no OSDs are up. Pass "
 	 << "--yes-i-really-mean-it if you really wish to continue.";
       err = -EPERM;
       goto reply;
     }
-    if (rel == ceph_release_t::mimic) {
-      if (!mon.monmap->get_required_features().contains_all(
-	    ceph::features::mon::FEATURE_MIMIC)) {
-	ss << "not all mons are mimic";
-	err = -EPERM;
-	goto reply;
-      }
-      if ((!HAVE_FEATURE(osdmap.get_up_osd_features(), SERVER_MIMIC))
-           && !sure) {
-	ss << "not all up OSDs have CEPH_FEATURE_SERVER_MIMIC feature";
-	err = -EPERM;
-	goto reply;
-      }
-    } else if (rel == ceph_release_t::nautilus) {
-      if (!mon.monmap->get_required_features().contains_all(
-	    ceph::features::mon::FEATURE_NAUTILUS)) {
-	ss << "not all mons are nautilus";
-	err = -EPERM;
-	goto reply;
-      }
-      if ((!HAVE_FEATURE(osdmap.get_up_osd_features(), SERVER_NAUTILUS))
-           && !sure) {
-	ss << "not all up OSDs have CEPH_FEATURE_SERVER_NAUTILUS feature";
-	err = -EPERM;
-	goto reply;
-      }
-    } else if (rel == ceph_release_t::octopus) {
+    if (rel == ceph_release_t::octopus) {
       if (!mon.monmap->get_required_features().contains_all(
 	    ceph::features::mon::FEATURE_OCTOPUS)) {
 	ss << "not all mons are octopus";
@@ -11488,8 +11444,21 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
 	err = -EPERM;
 	goto reply;
       }
+    } else if (rel == ceph_release_t::quincy) {
+      if (!mon.monmap->get_required_features().contains_all(
+	    ceph::features::mon::FEATURE_QUINCY)) {
+	ss << "not all mons are quincy";
+	err = -EPERM;
+	goto reply;
+      }
+      if ((!HAVE_FEATURE(osdmap.get_up_osd_features(), SERVER_QUINCY))
+           && !sure) {
+	ss << "not all up OSDs have CEPH_FEATURE_SERVER_QUINCY feature";
+	err = -EPERM;
+	goto reply;
+      }
     } else {
-      ss << "not supported for this release yet";
+      ss << "not supported for this release";
       err = -EPERM;
       goto reply;
     }
@@ -12551,7 +12520,7 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
     string addrstr;
     cmd_getval(cmdmap, "addr", addrstr);
     entity_addr_t addr;
-    if (!addr.parse(addrstr.c_str(), 0)) {
+    if (!addr.parse(addrstr)) {
       ss << "unable to parse address " << addrstr;
       err = -EINVAL;
       goto reply;

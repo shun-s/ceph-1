@@ -130,7 +130,7 @@ add_executable(ceph_test_rados_api_tier_pp
   $<TARGET_OBJECTS:unit-main>)
 target_link_libraries(ceph_test_rados_api_tier_pp
   librados global ${UNITTEST_LIBS} Boost::system radostest-cxx cls_cas_internal
-  spawn)
+  cls_cas_client spawn)
 
 add_executable(ceph_test_rados_api_snapshots
   snapshots.cc)
@@ -140,6 +140,12 @@ add_executable(ceph_test_rados_api_snapshots_pp
   snapshots_cxx.cc)
 target_link_libraries(ceph_test_rados_api_snapshots_pp
   librados ${UNITTEST_LIBS} radostest-cxx)
+
+add_executable(ceph_test_rados_api_cls_remote_reads
+  cls_remote_reads.cc
+  $<TARGET_OBJECTS:unit-main>)
+target_link_libraries(ceph_test_rados_api_cls_remote_reads
+  librados global ${UNITTEST_LIBS} radostest-cxx)
 
 install(TARGETS
   ceph_test_rados_api_aio
@@ -166,6 +172,7 @@ install(TARGETS
   ceph_test_rados_api_tier_pp
   ceph_test_rados_api_watch_notify
   ceph_test_rados_api_watch_notify_pp
+  ceph_test_rados_api_cls_remote_reads
   DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # unittest_librados

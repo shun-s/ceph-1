@@ -29,6 +29,7 @@ mechanism. This API is similar to the one defined as the S3-compatible API of th
 
    S3 Bucket Notification Compatibility <s3-notification-compatibility>
 
+.. note:: To enable bucket notifications API, the `rgw_enable_apis` configuration parameter should contain: "notifications".
 
 Notification Reliability
 ------------------------
@@ -136,11 +137,13 @@ Request parameters:
 
 - AMQP0.9.1 endpoint
 
- - URI: ``amqp://[<user>:<password>@]<fqdn>[:<port>][/<vhost>]``
+ - URI: ``amqp[s]://[<user>:<password>@]<fqdn>[:<port>][/<vhost>]``
  - user/password defaults to: guest/guest
  - user/password may only be provided over HTTPS. If not, topic creation request will be rejected.
- - port defaults to: 5672
+ - port defaults to: 5672/5671 for unencrypted/SSL-encrypted connections
  - vhost defaults to: "/"
+ - verify-ssl: indicate whether the server certificate is validated by the client or not ("true" by default)
+ - if ``ca-location`` is provided, and secure connection is used, the specified CA will be used, instead of the default one, to authenticate the broker
  - amqp-exchange: the exchanges must exist and be able to route messages based on topics (mandatory parameter for AMQP0.9.1). Different topics pointing to the same endpoint must use the same exchange
  - amqp-ack-level: no end2end acking is required, as messages may persist in the broker before delivered into their final destination. Three ack methods exist:
 
@@ -205,7 +208,7 @@ Response will have the following format:
 ::
 
     <GetTopicAttributesResponse>
-        <GetTopicAttributesRersult>
+        <GetTopicAttributesResult>
             <Attributes>
                 <entry>
                     <key>User</key>
@@ -263,7 +266,7 @@ Response will have the following format:
 ::
 
     <GetTopicResponse>
-        <GetTopicRersult>
+        <GetTopicResult>
             <Topic>
                 <User></User>
                 <Name></Name>
@@ -335,8 +338,8 @@ Response will have the following format:
 
 ::
 
-    <ListTopicdResponse xmlns="https://sns.amazonaws.com/doc/2010-03-31/">
-        <ListTopicsRersult>
+    <ListTopicsResponse xmlns="https://sns.amazonaws.com/doc/2010-03-31/">
+        <ListTopicsResult>
             <Topics>
                 <member>
                     <User></User>

@@ -16,9 +16,9 @@
 #define CEPH_MSG_DPDKSTACK_H
 
 #include <functional>
+#include <optional>
 
 #include "common/ceph_context.h"
-#include "common/Tub.h"
 
 #include "msg/async/Stack.h"
 #include "net.h"
@@ -55,8 +55,8 @@ class NativeConnectedSocketImpl : public ConnectedSocketImpl {
   typename Protocol::connection _conn;
   uint32_t _cur_frag = 0;
   uint32_t _cur_off = 0;
-  Tub<Packet> _buf;
-  Tub<bufferptr> _cache_ptr;
+  std::optional<Packet> _buf;
+  std::optional<bufferptr> _cache_ptr;
 
  public:
   explicit NativeConnectedSocketImpl(typename Protocol::connection conn)
@@ -73,10 +73,10 @@ class NativeConnectedSocketImpl : public ConnectedSocketImpl {
     size_t off = 0;
     while (left > 0) {
       if (!_cache_ptr) {
-        _cache_ptr.construct();
+        _cache_ptr.emplace();
         r = zero_copy_read(*_cache_ptr);
         if (r <= 0) {
-          _cache_ptr.destroy();
+          _cache_ptr.reset();
           if (r == -EAGAIN)
             break;
           return r;
@@ -86,7 +86,7 @@ class NativeConnectedSocketImpl : public ConnectedSocketImpl {
         _cache_ptr->copy_out(0, _cache_ptr->length(), buf+off);
         left -= _cache_ptr->length();
         off += _cache_ptr->length();
-        _cache_ptr.destroy();
+        _cache_ptr.reset();
       } else {
         _cache_ptr->copy_out(0, left, buf+off);
         _cache_ptr->set_offset(_cache_ptr->offset() + left);
@@ -119,7 +119,7 @@ private:
     if (++_cur_frag == _buf->nr_frags()) {
       _cur_frag = 0;
       _cur_off = 0;
-      _buf.destroy();
+      _buf.reset();
     } else {
       _cur_off += f.size;
     }
@@ -255,12 +255,11 @@ class DPDKStack : public NetworkStack {
   }
 
  public:
-  explicit DPDKStack(CephContext *cct): NetworkStack(cct) {
-    funcs.resize(cct->_conf->ms_async_max_op_threads);
-  }
+  explicit DPDKStack(CephContext *cct): NetworkStack(cct)
+  {}
   virtual bool support_local_listen_table() const override { return true; }
 
-  virtual void spawn_worker(unsigned i, std::function<void ()> &&func) override;
+  virtual void spawn_worker(std::function<void ()> &&func) override;
   virtual void join_worker(unsigned i) override;
 };
 

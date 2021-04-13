@@ -33,7 +33,6 @@
 
 #include "PGLog.h"
 #include "OSDMap.h"
-#include "messages/MOSDPGLog.h"
 #include "include/str_list.h"
 #include "PGBackend.h"
 #include "PGPeeringEvent.h"
@@ -57,14 +56,10 @@ class OSD;
 class OSDService;
 class OSDShard;
 class OSDShardPGSlot;
-class MOSDPGScan;
-class MOSDPGBackfill;
-class MOSDPGInfo;
 
 class PG;
 struct OpRequest;
 typedef OpRequest::Ref OpRequestRef;
-class MOSDPGLog;
 class DynamicPerfStats;
 class PgScrubber;
 
@@ -533,8 +528,8 @@ public:
   void dump_pgstate_history(ceph::Formatter *f);
   void dump_missing(ceph::Formatter *f);
 
-  void get_pg_stats(std::function<void(const pg_stat_t&, epoch_t lec)> f);
-  void with_heartbeat_peers(std::function<void(int)> f);
+  void with_pg_stats(std::function<void(const pg_stat_t&, epoch_t lec)>&& f);
+  void with_heartbeat_peers(std::function<void(int)>&& f);
 
   void shutdown();
   virtual void on_shutdown() = 0;
@@ -947,8 +942,7 @@ protected:
   // publish stats
   ceph::mutex pg_stats_publish_lock =
     ceph::make_mutex("PG::pg_stats_publish_lock");
-  bool pg_stats_publish_valid;
-  pg_stat_t pg_stats_publish;
+  std::optional<pg_stat_t> pg_stats_publish;
 
   friend class TestOpsSocketHook;
   void publish_stats_to_osd() override;

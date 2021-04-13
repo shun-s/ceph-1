@@ -1077,7 +1077,7 @@ public:
     bool cached;              ///< Onode is logically in the cache
                               /// (it can be pinned and hence physically out
                               /// of it at the moment though)
-    bool pinned;              ///< Onode is pinned
+    std::atomic_bool pinned;  ///< Onode is pinned
                               /// (or should be pinned when cached)
     ExtentMap extent_map;
 
@@ -1995,29 +1995,6 @@ public:
       store->_zoned_cleaner_thread();
       return nullptr;
     }
-  };
-
-  struct DBHistogram {
-    struct value_dist {
-      uint64_t count;
-      uint32_t max_len;
-    };
-
-    struct key_dist {
-      uint64_t count;
-      uint32_t max_len;
-      std::map<int, struct value_dist> val_map; ///< slab id to count, max length of value and key
-    };
-
-    std::map<std::string, std::map<int, struct key_dist> > key_hist;
-    std::map<int, uint64_t> value_hist;
-    int get_key_slab(size_t sz);
-    std::string get_key_slab_to_range(int slab);
-    int get_value_slab(size_t sz);
-    std::string get_value_slab_to_range(int slab);
-    void update_hist_entry(std::map<std::string, std::map<int, struct key_dist> > &key_hist,
-			  const std::string &prefix, size_t key_size, size_t value_size);
-    void dump(ceph::Formatter *f);
   };
 
   struct BigDeferredWriteContext {
@@ -2998,6 +2975,7 @@ public:
   void inject_misreference(coll_t cid1, ghobject_t oid1,
 			   coll_t cid2, ghobject_t oid2,
 			   uint64_t offset);
+  void inject_zombie_spanning_blob(coll_t cid, ghobject_t oid, int16_t blob_id);
   // resets global per_pool_omap in DB
   void inject_legacy_omap();
   // resets per_pool_omap | pgmeta_omap for onode
@@ -3051,6 +3029,7 @@ private:
   std::set<std::string> failed_compressors;
   std::string spillover_alert;
   std::string legacy_statfs_alert;
+  std::string no_per_pool_omap_alert;
   std::string no_per_pg_omap_alert;
   std::string disk_size_mismatch_alert;
   std::string spurious_read_errors_alert;
@@ -3081,7 +3060,7 @@ private:
   }
 
   void _check_legacy_statfs_alert();
-  void _check_no_per_pg_omap_alert();
+  void _check_no_per_pg_or_pool_omap_alert();
   void _set_disk_size_mismatch_alert(const std::string& s) {
     std::lock_guard l(qlock);
     disk_size_mismatch_alert = s;
@@ -3631,6 +3610,7 @@ public:
   bool fix_false_free(KeyValueDB *db,
 		      FreelistManager* fm,
 		      uint64_t offset, uint64_t len);
+  KeyValueDB::Transaction fix_spanning_blobs(KeyValueDB* db);
 
   void init(uint64_t total_space, uint64_t lres_tracking_unit_size);
 
@@ -3669,6 +3649,7 @@ private:
   KeyValueDB::Transaction fix_shared_blob_txn;
 
   KeyValueDB::Transaction fix_misreferences_txn;
+  KeyValueDB::Transaction fix_onode_txn;
 
   StoreSpaceTracker space_usage_tracker;
 
@@ -3782,7 +3763,7 @@ public:
   void* get_hint_for_log() const override {
     return  reinterpret_cast<void*>(LEVEL_LOG);
   }
-  void* get_hint_by_dir(const std::string& dirname) const override;
+  void* get_hint_by_dir(std::string_view dirname) const override;
 
   void add_usage(void* hint, const bluefs_fnode_t& fnode) override {
     if (hint == nullptr)

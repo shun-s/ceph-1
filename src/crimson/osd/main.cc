@@ -118,6 +118,16 @@ uint64_t get_nonce()
   }
 }
 
+static void configure_crc_handling(crimson::net::Messenger& msgr)
+{
+  if (local_conf()->ms_crc_data) {
+    msgr.set_crc_data();
+  }
+  if (local_conf()->ms_crc_header) {
+    msgr.set_crc_header();
+  }
+}
+
 seastar::future<> fetch_config()
 {
   // i don't have any client before joining the cluster, so no need to have
@@ -132,6 +142,7 @@ seastar::future<> fetch_config()
   auto msgr = crimson::net::Messenger::create(entity_name_t::CLIENT(),
                                               "temp_mon_client",
                                               get_nonce());
+  configure_crc_handling(*msgr);
   auto monc = std::make_unique<crimson::mon::Client>(*msgr, *auth_handler);
   msgr->set_auth_client(monc.get());
   return msgr->start({monc.get()}).then([monc=monc.get()] {
@@ -162,7 +173,8 @@ int main(int argc, char* argv[])
     ("mkkey", "generate a new secret key. "
               "This is normally used in combination with --mkfs")
     ("mkfs", "create a [new] data directory")
-    ("debug", "enable debug output on all loggers");
+    ("debug", "enable debug output on all loggers")
+    ("no-mon-config", "do not retrieve configuration from monitors on boot");
 
   auto [ceph_args, app_args] = partition_args(app, argv, argv + argc);
   if (ceph_argparse_need_usage(ceph_args) &&
@@ -221,12 +233,7 @@ int main(int argc, char* argv[])
                                   make_pair(std::ref(hb_back_msgr), "hb_back"s)}) {
           msgr = crimson::net::Messenger::create(entity_name_t::OSD(whoami), name,
                                                  nonce);
-          if (local_conf()->ms_crc_data) {
-            msgr->set_crc_data();
-          }
-          if (local_conf()->ms_crc_header) {
-            msgr->set_crc_header();
-          }
+          configure_crc_handling(*msgr);
         }
         osd.start_single(whoami, nonce,
                          cluster_msgr, client_msgr,
@@ -236,7 +243,9 @@ int main(int argc, char* argv[])
             seastar::engine().exit(1);
           }).get();
         }
-        fetch_config().get();
+        if (config.count("no-mon-config") == 0) {
+          fetch_config().get();
+        }
         if (config.count("mkfs")) {
           osd.invoke_on(
 	    0,

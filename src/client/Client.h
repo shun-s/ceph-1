@@ -354,7 +354,7 @@ public:
 
   /**
    * Returns the length of the buffer that got filled in, or -errno.
-   * If it returns -ERANGE you just need to increase the size of the
+   * If it returns -CEPHFS_ERANGE you just need to increase the size of the
    * buffer and try again.
    */
   int _getdents(dir_result_t *dirp, char *buf, int buflen, bool ful);  // get a bunch of dentries at once
@@ -369,6 +369,7 @@ public:
   loff_t telldir(dir_result_t *dirp);
   void seekdir(dir_result_t *dirp, loff_t offset);
 
+  int may_delete(const char *relpath, const UserPerm& perms);
   int link(const char *existing, const char *newname, const UserPerm& perm, std::string alternate_name="");
   int unlink(const char *path, const UserPerm& perm);
   int rename(const char *from, const char *to, const UserPerm& perm, std::string alternate_name="");
@@ -520,6 +521,7 @@ public:
   int ll_lookup(Inode *parent, const char *name, struct stat *attr,
 		Inode **out, const UserPerm& perms);
   int ll_lookup_inode(struct inodeno_t ino, const UserPerm& perms, Inode **inode);
+  int ll_lookup_vino(vinodeno_t vino, const UserPerm& perms, Inode **inode);
   int ll_lookupx(Inode *parent, const char *name, Inode **out,
 			struct ceph_statx *stx, unsigned want, unsigned flags,
 			const UserPerm& perms);
@@ -706,7 +708,6 @@ public:
   void wait_sync_caps(ceph_tid_t want);
   void queue_cap_snap(Inode *in, SnapContext &old_snapc);
   void finish_cap_snap(Inode *in, CapSnap &capsnap, int used);
-  void _flushed_cap_snap(Inode *in, snapid_t seq);
 
   void _schedule_invalidate_dentry_callback(Dentry *dn, bool del);
   void _async_dentry_invalidate(vinodeno_t dirino, vinodeno_t ino, string& name);
@@ -800,6 +801,36 @@ public:
   }
   std::pair<uint64_t, uint64_t> get_cap_hit_rates() {
     return std::make_pair(cap_hits, cap_misses);
+  }
+
+  void inc_opened_files() {
+    ++opened_files;
+  }
+  void dec_opened_files() {
+    --opened_files;
+  }
+  std::pair<uint64_t, uint64_t> get_opened_files_rates() {
+    return std::make_pair(opened_files, inode_map.size());
+  }
+
+  void inc_pinned_icaps() {
+    ++pinned_icaps;
+  }
+  void dec_pinned_icaps(uint64_t nr=1) {
+    pinned_icaps -= nr;
+  }
+  std::pair<uint64_t, uint64_t> get_pinned_icaps_rates() {
+    return std::make_pair(pinned_icaps, inode_map.size());
+  }
+
+  void inc_opened_inodes() {
+    ++opened_inodes;
+  }
+  void dec_opened_inodes() {
+    --opened_inodes;
+  }
+  std::pair<uint64_t, uint64_t> get_opened_inodes_rates() {
+    return std::make_pair(opened_inodes, inode_map.size());
   }
 
   xlist<Inode*> &get_dirty_list() { return dirty_list; }
@@ -1181,6 +1212,7 @@ private:
     MAY_READ = 4,
   };
 
+  std::unique_ptr<CephContext, std::function<void(CephContext*)>> cct_deleter;
 
   /* Flags for VXattr */
   static const unsigned VXATTR_RSTAT = 0x1;
@@ -1191,6 +1223,7 @@ private:
   static const VXattr _common_vxattrs[];
 
 
+  bool is_reserved_vino(vinodeno_t &vino);
 
   void fill_dirent(struct dirent *de, const char *name, int type, uint64_t ino, loff_t next_off);
 
@@ -1287,9 +1320,9 @@ private:
           const struct iovec *iov, int iovcnt);
   int64_t _preadv_pwritev_locked(Fh *fh, const struct iovec *iov,
                                  unsigned iovcnt, int64_t offset,
-                                 bool write, bool clamp_to_int,
-                                 std::unique_lock<ceph::mutex> &cl);
-  int _preadv_pwritev(int fd, const struct iovec *iov, unsigned iovcnt, int64_t offset, bool write);
+                                 bool write, bool clamp_to_int);
+  int _preadv_pwritev(int fd, const struct iovec *iov, unsigned iovcnt,
+                      int64_t offset, bool write);
   int _flush(Fh *fh);
   int _fsync(Fh *fh, bool syncdataonly);
   int _fsync(Inode *in, bool syncdataonly);
@@ -1371,7 +1404,7 @@ private:
   int _ll_getattr(Inode *in, int caps, const UserPerm& perms);
   int _lookup_parent(Inode *in, const UserPerm& perms, Inode **parent=NULL);
   int _lookup_name(Inode *in, Inode *parent, const UserPerm& perms);
-  int _lookup_ino(inodeno_t ino, const UserPerm& perms, Inode **inode=NULL);
+  int _lookup_vino(vinodeno_t ino, const UserPerm& perms, Inode **inode=NULL);
   bool _ll_forget(Inode *in, uint64_t count);
 
   void collect_and_send_metrics();
@@ -1440,7 +1473,7 @@ private:
   ino_t last_used_faked_ino;
   ino_t last_used_faked_root;
 
-  int local_osd = -ENXIO;
+  int local_osd = -CEPHFS_ENXIO;
   epoch_t local_osd_epoch = 0;
 
   // mds requests
@@ -1482,6 +1515,10 @@ private:
 
   uint64_t cap_hits = 0;
   uint64_t cap_misses = 0;
+
+  uint64_t opened_files = 0;
+  uint64_t pinned_icaps = 0;
+  uint64_t opened_inodes = 0;
 
   ceph::spinlock delay_i_lock;
   std::map<Inode*,int> delay_i_release;

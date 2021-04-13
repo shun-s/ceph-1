@@ -29,8 +29,6 @@
 #include "common/perf_counters.h"
 
 #include "messages/MOSDOp.h"
-#include "messages/MOSDPGNotify.h"
-#include "messages/MOSDPGInfo.h"
 #include "messages/MOSDPGScan.h"
 #include "messages/MOSDPGBackfill.h"
 #include "messages/MOSDPGBackfillRemove.h"
@@ -207,7 +205,6 @@ PG::PG(OSDService *o, OSDMapRef curmap,
   recovery_queued(false),
   recovery_ops_active(0),
   backfill_reserving(false),
-  pg_stats_publish_valid(false),
   finish_sync_event(NULL),
   scrub_after_recovery(false),
   active_pushes(0),
@@ -823,12 +820,10 @@ void PG::publish_stats_to_osd()
 
   std::lock_guard l{pg_stats_publish_lock};
   auto stats = recovery_state.prepare_stats_for_publish(
-    pg_stats_publish_valid,
     pg_stats_publish,
     unstable_stats);
   if (stats) {
-    pg_stats_publish = stats.value();
-    pg_stats_publish_valid = true;
+    pg_stats_publish = std::move(stats);
   }
 }
 
@@ -841,7 +836,7 @@ void PG::clear_publish_stats()
 {
   dout(15) << "clear_stats" << dendl;
   std::lock_guard l{pg_stats_publish_lock};
-  pg_stats_publish_valid = false;
+  pg_stats_publish.reset();
 }
 
 /**
@@ -1151,7 +1146,7 @@ void PG::read_state(ObjectStore *store)
   // init pool options
   store->set_collection_opts(ch, pool.info.opts);
 
-  PeeringCtx rctx(ceph_release_t::unknown);
+  PeeringCtx rctx;
   handle_initialize(rctx);
   // note: we don't activate here because we know the OSD will advance maps
   // during boot.
@@ -2183,13 +2178,13 @@ void PG::scrub_send_replmaps_ready(epoch_t epoch_queued,
 
 bool PG::ops_blocked_by_scrub() const
 {
-  return (waiting_for_scrub.size() != 0);
+  return !waiting_for_scrub.empty();
 }
 
 Scrub::scrub_prio_t PG::is_scrub_blocking_ops() const
 {
-  return waiting_for_scrub.size() ? Scrub::scrub_prio_t::high_priority
-				  : Scrub::scrub_prio_t::low_priority;
+  return waiting_for_scrub.empty() ? Scrub::scrub_prio_t::low_priority
+				   : Scrub::scrub_prio_t::high_priority;
 }
 
 bool PG::old_peering_msg(epoch_t reply_epoch, epoch_t query_epoch)
@@ -2794,15 +2789,15 @@ void PG::dump_missing(Formatter *f)
   }
 }
 
-void PG::get_pg_stats(std::function<void(const pg_stat_t&, epoch_t lec)> f)
+void PG::with_pg_stats(std::function<void(const pg_stat_t&, epoch_t lec)>&& f)
 {
   std::lock_guard l{pg_stats_publish_lock};
-  if (pg_stats_publish_valid) {
-    f(pg_stats_publish, pg_stats_publish.get_effective_last_epoch_clean());
+  if (pg_stats_publish) {
+    f(*pg_stats_publish, pg_stats_publish->get_effective_last_epoch_clean());
   }
 }
 
-void PG::with_heartbeat_peers(std::function<void(int)> f)
+void PG::with_heartbeat_peers(std::function<void(int)>&& f)
 {
   std::lock_guard l{heartbeat_peer_lock};
   for (auto p : heartbeat_peers) {

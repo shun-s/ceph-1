@@ -668,9 +668,14 @@ template <typename I>
 void AbstractWriteLog<I>::read(Extents&& image_extents,
                                      ceph::bufferlist* bl,
                                      int fadvise_flags, Context *on_finish) {
-  // TODO: handle writesame and discard case in later PRs
   CephContext *cct = m_image_ctx.cct;
   utime_t now = ceph_clock_now();
+
+  on_finish = new LambdaContext(
+  [this, on_finish](int r) {
+    m_async_op_tracker.finish_op();
+    on_finish->complete(r);
+  });
   C_ReadRequest *read_ctx = m_builder->create_read_request(
       cct, now, m_perfcounter, bl, on_finish);
   ldout(cct, 20) << "name: " << m_image_ctx.name << " id: " << m_image_ctx.id
@@ -685,6 +690,7 @@ void AbstractWriteLog<I>::read(Extents&& image_extents,
   std::vector<WriteLogCacheEntry*> log_entries_to_read;
   std::vector<bufferlist*> bls_to_read;
 
+  m_async_op_tracker.start_op();
   Context *ctx = new LambdaContext(
     [this, read_ctx, fadvise_flags](int r) {
       if (read_ctx->miss_extents.empty()) {
@@ -730,7 +736,7 @@ void AbstractWriteLog<I>::read(Extents&& image_extents,
         Extent miss_extent(miss_extent_start, miss_extent_length);
         read_ctx->miss_extents.push_back(miss_extent);
         /* Add miss range to read extents */
-        ImageExtentBuf miss_extent_buf(miss_extent);
+        auto miss_extent_buf = std::make_shared<ImageExtentBuf>(miss_extent);
         read_ctx->read_extents.push_back(miss_extent_buf);
         extent_offset += miss_extent_length;
       }
@@ -749,6 +755,7 @@ void AbstractWriteLog<I>::read(Extents&& image_extents,
       if (0 == map_entry.log_entry->write_bytes() &&
           0 < map_entry.log_entry->bytes_dirty()) {
         /* discard log entry */
+        ldout(cct, 20) << "discard log entry" << dendl;
         auto discard_entry = map_entry.log_entry;
         ldout(cct, 20) << "read hit on discard entry: log_entry="
                        << *discard_entry
@@ -757,9 +764,11 @@ void AbstractWriteLog<I>::read(Extents&& image_extents,
         bufferlist zero_bl;
         zero_bl.append_zero(entry_hit_length);
         /* Add hit extent to read extents */
-        ImageExtentBuf hit_extent_buf(hit_extent, zero_bl);
+        auto hit_extent_buf = std::make_shared<ImageExtentBuf>(
+            hit_extent, zero_bl);
         read_ctx->read_extents.push_back(hit_extent_buf);
       } else {
+        ldout(cct, 20) << "write or writesame log entry" << dendl;
         /* write and writesame log entry */
         /* Offset of the map entry into the log entry's buffer */
         uint64_t map_entry_buffer_offset = entry_image_extent.first -
@@ -783,7 +792,7 @@ void AbstractWriteLog<I>::read(Extents&& image_extents,
       Extent miss_extent(miss_extent_start, miss_extent_length);
       read_ctx->miss_extents.push_back(miss_extent);
       /* Add miss range to read extents */
-      ImageExtentBuf miss_extent_buf(miss_extent);
+      auto miss_extent_buf = std::make_shared<ImageExtentBuf>(miss_extent);
       read_ctx->read_extents.push_back(miss_extent_buf);
       extent_offset += miss_extent_length;
     }
@@ -809,15 +818,46 @@ void AbstractWriteLog<I>::write(Extents &&image_extents,
 
   ceph_assert(m_initialized);
 
+  /* Split images because PMDK's space management is not perfect, there are
+   * fragment problems. The larger the block size difference of the block,
+   * the easier the fragmentation problem will occur, resulting in the
+   * remaining space can not be allocated in large size. We plan to manage
+   * pmem space and allocation by ourselves in the future.
+   */
+  Extents split_image_extents;
+  uint64_t max_extent_size = get_max_extent();
+  if (max_extent_size != 0) {
+    for (auto extent : image_extents) {
+      if (extent.second > max_extent_size) {
+        uint64_t off = extent.first;
+        uint64_t extent_bytes = extent.second;
+        for (int i = 0; extent_bytes != 0; ++i) {
+          Extent _ext;
+          _ext.first = off + i * max_extent_size;
+          _ext.second = std::min(max_extent_size, extent_bytes);
+          extent_bytes = extent_bytes - _ext.second ;
+          split_image_extents.emplace_back(_ext);
+        }
+      } else {
+        split_image_extents.emplace_back(extent);
+      }
+    }
+  } else {
+    split_image_extents = image_extents;
+  }
+
   C_WriteRequestT *write_req =
-    m_builder->create_write_request(*this, now, std::move(image_extents), std::move(bl),
-                                    fadvise_flags, m_lock, m_perfcounter, on_finish);
-  m_perfcounter->inc(l_librbd_pwl_wr_bytes, write_req->image_extents_summary.total_bytes);
+    m_builder->create_write_request(*this, now, std::move(split_image_extents),
+                                    std::move(bl), fadvise_flags, m_lock,
+                                    m_perfcounter, on_finish);
+  m_perfcounter->inc(l_librbd_pwl_wr_bytes,
+                      write_req->image_extents_summary.total_bytes);
 
   /* The lambda below will be called when the block guard for all
    * blocks affected by this write is obtained */
   GuardedRequestFunctionContext *guarded_ctx =
-    new GuardedRequestFunctionContext([this, write_req](GuardedRequestFunctionContext &guard_ctx) {
+    new GuardedRequestFunctionContext([this,
+      write_req](GuardedRequestFunctionContext &guard_ctx) {
       write_req->blockguard_acquired(guard_ctx);
       alloc_and_dispatch_io_req(write_req);
     });
@@ -871,7 +911,8 @@ void AbstractWriteLog<I>::flush(io::FlushSource flush_source, Context *on_finish
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 20) << "on_finish=" << on_finish << " flush_source=" << flush_source << dendl;
 
-  if (io::FLUSH_SOURCE_SHUTDOWN == flush_source || io::FLUSH_SOURCE_INTERNAL == flush_source) {
+  if (io::FLUSH_SOURCE_SHUTDOWN == flush_source || io::FLUSH_SOURCE_INTERNAL == flush_source ||
+      io::FLUSH_SOURCE_WRITE_BLOCK == flush_source) {
     internal_flush(false, on_finish);
     return;
   }
@@ -1250,6 +1291,11 @@ void AbstractWriteLog<I>::complete_op_log_entries(GenericLogOperations &&ops,
     if (op->reserved_allocated()) {
       published_reserves++;
     }
+    {
+      std::lock_guard locker(m_lock);
+      m_unpublished_reserves -= published_reserves;
+      m_dirty_log_entries.splice(m_dirty_log_entries.end(), dirty_entries);
+    }
     op->complete(result);
     m_perfcounter->tinc(l_librbd_pwl_log_op_dis_to_app_t,
                         op->log_append_time - op->dispatch_time);
@@ -1263,13 +1309,9 @@ void AbstractWriteLog<I>::complete_op_log_entries(GenericLogOperations &&ops,
                       log_entry->ram_entry.write_bytes);
     m_perfcounter->tinc(l_librbd_pwl_log_op_app_to_cmp_t, now - op->log_append_time);
   }
-
+  // New entries may be flushable
   {
     std::lock_guard locker(m_lock);
-    m_unpublished_reserves -= published_reserves;
-    m_dirty_log_entries.splice(m_dirty_log_entries.end(), dirty_entries);
-
-    /* New entries may be flushable */
     wake_up();
   }
 }
@@ -1315,7 +1357,9 @@ void AbstractWriteLog<I>::dispatch_deferred_writes(void)
         }
         ceph_assert(!allocated);
         if (!allocated && front_req) {
-          /* front_req->alloc_resources() failed on the last iteration. We'll stop dispatching. */
+          /* front_req->alloc_resources() failed on the last iteration.
+           * We'll stop dispatching. */
+          wake_up();
           front_req = nullptr;
           ceph_assert(!cleared_dispatching_flag);
           m_dispatching_deferred_ops = false;
@@ -1388,6 +1432,11 @@ void AbstractWriteLog<I>::alloc_and_dispatch_io_req(C_BlockIORequestT *req)
     {
       std::lock_guard locker(m_lock);
       dispatch_here = m_deferred_ios.empty();
+      // Only flush req's total_bytes is the max uint64
+      if ((req->image_extents_summary.total_bytes ==
+          std::numeric_limits<uint64_t>::max())) {
+        dispatch_here = true;
+      }
     }
     if (dispatch_here) {
       dispatch_here = req->alloc_resources();
@@ -1437,7 +1486,7 @@ bool AbstractWriteLog<I>::check_allocation(C_BlockIORequestT *req,
     /* Don't attempt buffer allocate if we've exceeded the "full" threshold */
     if (m_bytes_allocated + bytes_allocated > bytes_allocated_cap) {
       if (!req->has_io_waited_for_buffers()) {
-        req->set_io_waited_for_entries(true);
+        req->set_io_waited_for_buffers(true);
         ldout(m_image_ctx.cct, 1) << "Waiting for allocation cap (cap="
                                   << bytes_allocated_cap
                                   << ", allocated=" << m_bytes_allocated
@@ -1464,6 +1513,10 @@ bool AbstractWriteLog<I>::check_allocation(C_BlockIORequestT *req,
       m_bytes_allocated += bytes_allocated;
       m_bytes_cached += bytes_cached;
       m_bytes_dirty += bytes_dirtied;
+      if (req->has_io_waited_for_buffers()) {
+        req->set_io_waited_for_buffers(false);
+      }
+
     } else {
       alloc_succeeds = false;
     }

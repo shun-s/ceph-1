@@ -61,13 +61,10 @@ struct PeeringCtx;
 
 // [primary only] content recovery state
 struct BufferedRecoveryMessages {
-  ceph_release_t require_osd_release;
   std::map<int, std::vector<MessageRef>> message_map;
 
-  BufferedRecoveryMessages(ceph_release_t r)
-    : require_osd_release(r) {
-  }
-  BufferedRecoveryMessages(ceph_release_t r, PeeringCtx &ctx);
+  BufferedRecoveryMessages() = default;
+  BufferedRecoveryMessages(PeeringCtx &ctx);
 
   void accept_buffered_messages(BufferedRecoveryMessages &m) {
     for (auto &[target, ls] : m.message_map) {
@@ -190,8 +187,7 @@ struct PeeringCtx : BufferedRecoveryMessages {
   ObjectStore::Transaction transaction;
   HBHandle* handle = nullptr;
 
-  PeeringCtx(ceph_release_t r)
-    : BufferedRecoveryMessages(r) {}
+  PeeringCtx() = default;
 
   PeeringCtx(const PeeringCtx &) = delete;
   PeeringCtx &operator=(const PeeringCtx &) = delete;
@@ -1470,7 +1466,7 @@ public:
   uint64_t upacting_features = CEPH_FEATURES_SUPPORTED_DEFAULT;
 
   /// most recently consumed osdmap's require_osd_version
-  ceph_release_t last_require_osd_release = ceph_release_t::unknown;
+  ceph_release_t last_require_osd_release;
 
   std::vector<int> want_acting; ///< non-empty while peering needs a new acting set
 
@@ -1825,10 +1821,15 @@ public:
    *
    * Returns updated pg_stat_t if stats have changed since
    * pg_stats_publish adding in unstable_stats.
+   *
+   * @param pg_stats_publish the latest pg_stat possessed by caller
+   * @param unstable_stats additional stats which should be included in the
+   *        returned stats
+   * @return the up to date stats if it is different from the specfied
+   *         @c pg_stats_publish
    */
   std::optional<pg_stat_t> prepare_stats_for_publish(
-    bool pg_stats_publish_valid,
-    const pg_stat_t &pg_stats_publish,
+    const std::optional<pg_stat_t> &pg_stats_publish,
     const object_stat_collection_t &unstable_stats);
 
   /**
@@ -2305,6 +2306,16 @@ public:
     ceph_assert(!is_primary());
     return !pg_log.get_log().has_write_since(
       hoid, get_min_last_complete_ondisk());
+  }
+
+  /**
+   * Returns whether the current acting set is able to go active
+   * and serve writes. It needs to satisfy min_size and any
+   * applicable stretch cluster constraints.
+   */
+  bool acting_set_writeable() {
+    return (actingset.size() >= pool.info.min_size) &&
+      (pool.info.stretch_set_can_peer(acting, *get_osdmap(), NULL));
   }
 
   /**

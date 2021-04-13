@@ -3331,10 +3331,13 @@ paths:
     put:
       description: "\n        Update the specified host.\n        Note, this is only\
         \ supported when Ceph Orchestrator is enabled.\n        :param hostname: The\
-        \ name of the host to be processed.\n        :param labels: List of labels.\n\
-        \        "
+        \ name of the host to be processed.\n        :param update_labels: To update\
+        \ the labels.\n        :param labels: List of labels.\n        :param maintenance:\
+        \ Enter/Exit maintenance mode.\n        :param force: Force enter maintenance\
+        \ mode.\n        "
       parameters:
-      - in: path
+      - description: Hostname
+        in: path
         name: hostname
         required: true
         schema:
@@ -3344,16 +3347,31 @@ paths:
           application/json:
             schema:
               properties:
+                force:
+                  default: false
+                  description: Force Enter Maintenance
+                  type: boolean
                 labels:
-                  type: string
-              required:
-              - labels
+                  description: Host Labels
+                  items:
+                    type: string
+                  type: array
+                maintenance:
+                  default: false
+                  description: Enter/Exit Maintenance
+                  type: boolean
+                update_labels:
+                  default: false
+                  description: Update Labels
+                  type: boolean
               type: object
       responses:
         '200':
           content:
             application/vnd.ceph.api.v1.0+json:
-              type: object
+              schema:
+                properties: {}
+                type: object
           description: Resource updated.
         '202':
           content:
@@ -7404,6 +7422,11 @@ paths:
         name: stats
         schema:
           type: boolean
+      - allowEmptyValue: true
+        in: query
+        name: daemon_name
+        schema:
+          type: string
       responses:
         '200':
           content:
@@ -7431,6 +7454,8 @@ paths:
             schema:
               properties:
                 bucket:
+                  type: string
+                daemon_name:
                   type: string
                 lock_enabled:
                   default: 'false'
@@ -7488,6 +7513,11 @@ paths:
         name: purge_objects
         schema:
           type: string
+      - allowEmptyValue: true
+        in: query
+        name: daemon_name
+        schema:
+          type: string
       responses:
         '202':
           content:
@@ -7517,6 +7547,11 @@ paths:
       - in: path
         name: bucket
         required: true
+        schema:
+          type: string
+      - allowEmptyValue: true
+        in: query
+        name: daemon_name
         schema:
           type: string
       responses:
@@ -7551,6 +7586,8 @@ paths:
             schema:
               properties:
                 bucket_id:
+                  type: string
+                daemon_name:
                   type: string
                 lock_mode:
                   type: string
@@ -7615,11 +7652,19 @@ paths:
                     version:
                       description: Ceph Version
                       type: string
+                    zone_name:
+                      description: Zone
+                      type: string
+                    zonegroup_name:
+                      description: Zone Group
+                      type: string
                   type: object
                 required:
                 - id
                 - version
                 - server_hostname
+                - zonegroup_name
+                - zone_name
                 type: array
           description: OK
         '400':
@@ -7669,6 +7714,11 @@ paths:
       - allowEmptyValue: true
         in: query
         name: query
+        schema:
+          type: string
+      - allowEmptyValue: true
+        in: query
+        name: daemon_name
         schema:
           type: string
       responses:
@@ -7726,7 +7776,12 @@ paths:
       - Rgw
   /api/rgw/user:
     get:
-      parameters: []
+      parameters:
+      - allowEmptyValue: true
+        in: query
+        name: daemon_name
+        schema:
+          type: string
       responses:
         '200':
           content:
@@ -7764,6 +7819,8 @@ paths:
             schema:
               properties:
                 access_key:
+                  type: string
+                daemon_name:
                   type: string
                 display_name:
                   type: string
@@ -7809,7 +7866,12 @@ paths:
       - RgwUser
   /api/rgw/user/get_emails:
     get:
-      parameters: []
+      parameters:
+      - allowEmptyValue: true
+        in: query
+        name: daemon_name
+        schema:
+          type: string
       responses:
         '200':
           content:
@@ -7835,6 +7897,11 @@ paths:
       - in: path
         name: uid
         required: true
+        schema:
+          type: string
+      - allowEmptyValue: true
+        in: query
+        name: daemon_name
         schema:
           type: string
       responses:
@@ -7868,6 +7935,16 @@ paths:
         required: true
         schema:
           type: string
+      - allowEmptyValue: true
+        in: query
+        name: daemon_name
+        schema:
+          type: string
+      - default: true
+        in: query
+        name: stats
+        schema:
+          type: boolean
       responses:
         '200':
           content:
@@ -7899,6 +7976,8 @@ paths:
           application/json:
             schema:
               properties:
+                daemon_name:
+                  type: string
                 display_name:
                   type: string
                 email:
@@ -7950,6 +8029,11 @@ paths:
         required: true
         schema:
           type: string
+      - allowEmptyValue: true
+        in: query
+        name: daemon_name
+        schema:
+          type: string
       responses:
         '202':
           content:
@@ -7986,6 +8070,8 @@ paths:
           application/json:
             schema:
               properties:
+                daemon_name:
+                  type: string
                 perm:
                   type: string
                 type:
@@ -8041,6 +8127,11 @@ paths:
         name: access_key
         schema:
           type: string
+      - allowEmptyValue: true
+        in: query
+        name: daemon_name
+        schema:
+          type: string
       responses:
         '202':
           content:
@@ -8078,6 +8169,8 @@ paths:
             schema:
               properties:
                 access_key:
+                  type: string
+                daemon_name:
                   type: string
                 generate_key:
                   default: 'true'
@@ -8122,6 +8215,11 @@ paths:
         required: true
         schema:
           type: string
+      - allowEmptyValue: true
+        in: query
+        name: daemon_name
+        schema:
+          type: string
       responses:
         '200':
           content:
@@ -8153,6 +8251,8 @@ paths:
           application/json:
             schema:
               properties:
+                daemon_name:
+                  type: string
                 enabled:
                   type: string
                 max_objects:
@@ -8207,6 +8307,8 @@ paths:
                 access:
                   type: string
                 access_key:
+                  type: string
+                daemon_name:
                   type: string
                 generate_secret:
                   default: 'true'
@@ -8265,6 +8367,11 @@ paths:
       - default: 'true'
         in: query
         name: purge_keys
+        schema:
+          type: string
+      - allowEmptyValue: true
+        in: query
+        name: daemon_name
         schema:
           type: string
       responses:

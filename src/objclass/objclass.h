@@ -148,6 +148,12 @@ extern void cls_cxx_subop_version(cls_method_context_t hctx, std::string *s);
 
 extern int cls_get_snapset_seq(cls_method_context_t hctx, uint64_t *snap_seq);
 
+/* gather */
+extern int cls_cxx_gather(cls_method_context_t hctx, const std::set<std::string> &src_objs, const std::string& pool,
+			  const char *cls, const char *method, bufferlist& inbl);
+
+extern int cls_cxx_get_gathered_data(cls_method_context_t hctx, std::map<std::string, bufferlist> *results);
+
 /* These are also defined in rados.h and librados.h. Keep them in sync! */
 #define CEPH_OSD_TMAP_HDR 'h'
 #define CEPH_OSD_TMAP_SET 's'
@@ -157,7 +163,7 @@ extern int cls_get_snapset_seq(cls_method_context_t hctx, uint64_t *snap_seq);
 int cls_cxx_chunk_write_and_set(cls_method_context_t hctx, int ofs, int len,
                    ceph::buffer::list *write_inbl, uint32_t op_flags, ceph::buffer::list *set_inbl,
 		   int set_len);
-bool cls_has_chunk(cls_method_context_t hctx, std::string fp_oid);
+int cls_get_manifest_ref_count(cls_method_context_t hctx, std::string fp_oid);
 
 extern uint64_t cls_get_osd_min_alloc_size(cls_method_context_t hctx);
 extern uint64_t cls_get_pool_stripe_width(cls_method_context_t hctx);

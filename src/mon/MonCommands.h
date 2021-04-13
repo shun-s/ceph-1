@@ -437,6 +437,7 @@ COMMAND("fs mirror disable "
 	"disable mirroring for a ceph filesystem", "mds", "rw")
 COMMAND("fs mirror peer_add "
 	"name=fs_name,type=CephString "
+	"name=uuid,type=CephString "
 	"name=remote_cluster_spec,type=CephString "
 	"name=remote_fs_name,type=CephString",
 	"add a mirror peer for a ceph filesystem", "mds", "rw")
@@ -847,7 +848,7 @@ COMMAND("osd unset "
 	"notieragent|nosnaptrim",
 	"unset <key>", "osd", "rw")
 COMMAND("osd require-osd-release "\
-	"name=release,type=CephChoices,strings=luminous|mimic|nautilus|octopus|pacific "
+	"name=release,type=CephChoices,strings=octopus|pacific|quincy "
         "name=yes_i_really_mean_it,type=CephBool,req=false",
 	"set the minimum allowed OSD release to participate in the cluster",
 	"osd", "rw")
@@ -1200,7 +1201,7 @@ COMMAND("osd tier add-cache "
 	"osd", "rw")
 
 /*
- * mon/ConfigKeyService.cc
+ * mon/KVMonitor.cc
  */
 
 COMMAND("config-key get "
@@ -1235,6 +1236,9 @@ COMMAND("config-key dump "
 /*
  * mon/MgrMonitor.cc
  */
+COMMAND("mgr stat",
+	"dump basic info about the mgr cluster state",
+	"mgr", "r")
 COMMAND("mgr dump "
 	"name=epoch,type=CephInt,range=0,req=false",
 	"dump the latest MgrMap",

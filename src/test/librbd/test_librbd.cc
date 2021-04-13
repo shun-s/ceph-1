@@ -2141,10 +2141,21 @@ TEST_F(TestLibRBD, TestEncryptionLUKS1)
 #else
   ASSERT_EQ(0, rbd_encryption_format(
           image, RBD_ENCRYPTION_FORMAT_LUKS1, &opts, sizeof(opts)));
-  ASSERT_EQ(0, rbd_encryption_load(
+  ASSERT_EQ(-EEXIST, rbd_encryption_load(
           image, RBD_ENCRYPTION_FORMAT_LUKS1, &opts, sizeof(opts)));
 
   test_io(image);
+
+  bool passed;
+  write_test_data(image, "test", 0, 4, 0, &passed);
+  ASSERT_TRUE(passed);
+  ASSERT_EQ(0, rbd_close(image));
+
+  ASSERT_EQ(0, rbd_open(ioctx, name.c_str(), &image, NULL));
+  ASSERT_EQ(0, rbd_encryption_load(
+          image, RBD_ENCRYPTION_FORMAT_LUKS1, &opts, sizeof(opts)));
+  read_test_data(image, "test", 0, 4, 0, &passed);
+  ASSERT_TRUE(passed);
 #endif
 
   ASSERT_EQ(0, rbd_close(image));
@@ -2182,10 +2193,21 @@ TEST_F(TestLibRBD, TestEncryptionLUKS2)
 #else
   ASSERT_EQ(0, rbd_encryption_format(
           image, RBD_ENCRYPTION_FORMAT_LUKS2, &opts, sizeof(opts)));
-  ASSERT_EQ(0, rbd_encryption_load(
+  ASSERT_EQ(-EEXIST, rbd_encryption_load(
           image, RBD_ENCRYPTION_FORMAT_LUKS2, &opts, sizeof(opts)));
 
   test_io(image);
+
+  bool passed;
+  write_test_data(image, "test", 0, 4, 0, &passed);
+  ASSERT_TRUE(passed);
+  ASSERT_EQ(0, rbd_close(image));
+
+  ASSERT_EQ(0, rbd_open(ioctx, name.c_str(), &image, NULL));
+  ASSERT_EQ(0, rbd_encryption_load(
+          image, RBD_ENCRYPTION_FORMAT_LUKS2, &opts, sizeof(opts)));
+  read_test_data(image, "test", 0, 4, 0, &passed);
+  ASSERT_TRUE(passed);
 #endif
 
   ASSERT_EQ(0, rbd_close(image));
@@ -5054,7 +5076,7 @@ TEST_F(TestLibRBD, RebuildObjectMapViaLockOwner)
 
 TEST_F(TestLibRBD, RenameViaLockOwner)
 {
-  REQUIRE_FEATURE(RBD_FEATURE_JOURNALING);
+  REQUIRE_FEATURE(RBD_FEATURE_EXCLUSIVE_LOCK);
 
   librados::IoCtx ioctx;
   ASSERT_EQ(0, _rados.ioctx_create(m_pool_name.c_str(), ioctx));
@@ -5068,14 +5090,22 @@ TEST_F(TestLibRBD, RenameViaLockOwner)
   librbd::Image image1;
   ASSERT_EQ(0, rbd.open(ioctx, image1, name.c_str(), NULL));
 
+  bool lock_owner;
+  ASSERT_EQ(0, image1.is_exclusive_lock_owner(&lock_owner));
+  ASSERT_FALSE(lock_owner);
+
+  std::string new_name = get_temp_image_name();
+  ASSERT_EQ(0, rbd.rename(ioctx, name.c_str(), new_name.c_str()));
+  ASSERT_EQ(0, image1.is_exclusive_lock_owner(&lock_owner));
+  ASSERT_FALSE(lock_owner);
+
   bufferlist bl;
   ASSERT_EQ(0, image1.write(0, 0, bl));
-
-  bool lock_owner;
   ASSERT_EQ(0, image1.is_exclusive_lock_owner(&lock_owner));
   ASSERT_TRUE(lock_owner);
 
-  std::string new_name = get_temp_image_name();
+  name = new_name;
+  new_name = get_temp_image_name();
   ASSERT_EQ(0, rbd.rename(ioctx, name.c_str(), new_name.c_str()));
   ASSERT_EQ(0, image1.is_exclusive_lock_owner(&lock_owner));
   ASSERT_TRUE(lock_owner);

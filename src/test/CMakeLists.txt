@@ -61,6 +61,7 @@ if(NOT WIN32)
   add_subdirectory(filestore)
   add_subdirectory(fs)
   add_subdirectory(libcephfs)
+  add_subdirectory(libcephsqlite)
   add_subdirectory(client)
   add_subdirectory(mon)
   add_subdirectory(mgr)
@@ -150,6 +151,12 @@ add_executable(ceph_bench_log
 target_link_libraries(ceph_bench_log global pthread ${BLKID_LIBRARIES} ${CMAKE_DL_LIBS})
 if(NOT WIN32)
   target_link_libraries(ceph_bench_log rt)
+endif()
+
+if(WITH_SYSTEMD)
+  add_executable(ceph_bench_journald_logger
+    bench_journald_logger.cc)
+  target_link_libraries(ceph_bench_journald_logger ceph-common)
 endif()
 
 # ceph_test_mutate
@@ -278,6 +285,7 @@ target_link_libraries(ceph_test_librgw_file
   ${UNITTEST_LIBS}
   ${EXTRALIBS}
   )
+install(TARGETS ceph_test_librgw_file DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # ceph_test_librgw_file_cd (just the rgw_file create-delete bucket ops)
 add_executable(ceph_test_librgw_file_cd
@@ -290,6 +298,7 @@ target_link_libraries(ceph_test_librgw_file_cd
   ${UNITTEST_LIBS}
   ${EXTRALIBS}
   )
+install(TARGETS ceph_test_librgw_file_cd DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # ceph_test_librgw_file_gp (just the rgw_file get-put bucket ops)
 add_executable(ceph_test_librgw_file_gp
@@ -302,6 +311,7 @@ target_link_libraries(ceph_test_librgw_file_gp
   ${UNITTEST_LIBS}
   ${EXTRALIBS}
   )
+install(TARGETS ceph_test_librgw_file_gp DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # ceph_test_librgw_file_nfsns (nfs namespace tests)
 add_executable(ceph_test_librgw_file_nfsns
@@ -319,6 +329,7 @@ target_link_libraries(ceph_test_librgw_file_nfsns
   ${EXTRALIBS}
   )
   target_link_libraries(ceph_test_librgw_file_nfsns spawn)
+install(TARGETS ceph_test_librgw_file_nfsns DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # ceph_test_librgw_file_aw (nfs write transaction [atomic write] tests)
 add_executable(ceph_test_librgw_file_aw
@@ -331,6 +342,7 @@ target_link_libraries(ceph_test_librgw_file_aw
   ${UNITTEST_LIBS}
   ${EXTRALIBS}
   )
+install(TARGETS ceph_test_librgw_file_aw DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # ceph_test_librgw_file_marker (READDIR with string and uint64 offsets)
 add_executable(ceph_test_librgw_file_marker
@@ -345,6 +357,7 @@ target_link_libraries(ceph_test_librgw_file_marker
   ${EXTRALIBS}
   )
   target_link_libraries(ceph_test_librgw_file_marker spawn)
+install(TARGETS ceph_test_librgw_file_marker DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # ceph_test_librgw_file_xattr (attribute ops)
 add_executable(ceph_test_librgw_file_xattr
@@ -524,6 +537,7 @@ if(NOT WIN32)
   ceph-mon
   get_command_descriptions
   ceph-dencoder
+  ceph-dencoder-modules
   ceph-objectstore-tool
   ceph-kvstore-tool
   ceph-monstore-tool
@@ -583,6 +597,26 @@ add_ceph_test(run-cli-tests ${CMAKE_CURRENT_SOURCE_DIR}/run-cli-tests)
 #add_ceph_test(test_pidfile.sh ${CMAKE_CURRENT_SOURCE_DIR}/test_pidfile.sh)
 
 add_ceph_test(smoke.sh ${CMAKE_CURRENT_SOURCE_DIR}/smoke.sh)
+
+find_program(PROMTOOL_EXECUTABLE promtool)
+if(PROMTOOL_EXECUTABLE)
+  execute_process(
+    COMMAND ${PROMTOOL_EXECUTABLE} test rules /dev/null
+    RESULT_VARIABLE rc
+    OUTPUT_QUIET)
+  if(NOT rc)
+    add_ceph_test(run-promtool-unittests
+      ${PROMTOOL_EXECUTABLE} test rules ${CMAKE_SOURCE_DIR}/monitoring/prometheus/alerts/test_alerts.yml)
+  else()
+    message(WARNING "'${PROMTOOL_EXECUTABLE} test rules' does not work, "
+      "please use a newer prometheus")
+  endif()
+else()
+  if(LINUX)
+    add_ceph_test(run-promtool-unittests
+      {CMAKE_CURRENT_SOURCE_DIR}/run-promtool-unittests.sh)
+  endif()
+endif()
 
 set_property(
   TEST ${tox_tests}

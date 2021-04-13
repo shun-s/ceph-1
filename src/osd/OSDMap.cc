@@ -238,8 +238,8 @@ int OSDMap::Incremental::identify_osd(uuid_d u) const
   return -1;
 }
 
-int OSDMap::Incremental::propagate_snaps_to_tiers(CephContext *cct,
-						  const OSDMap& osdmap)
+int OSDMap::Incremental::propagate_base_properties_to_tiers(CephContext *cct,
+							    const OSDMap& osdmap)
 {
   ceph_assert(epoch == osdmap.get_epoch() + 1);
 
@@ -279,6 +279,8 @@ int OSDMap::Incremental::propagate_snaps_to_tiers(CephContext *cct,
 	if (new_rem_it != new_removed_snaps.end()) {
 	  new_removed_snaps[tier_pool] = new_rem_it->second;
 	}
+
+	tier->application_metadata = base.application_metadata;
       }
     }
   }
@@ -653,7 +655,6 @@ void OSDMap::Incremental::encode(ceph::buffer::list& bl, uint64_t features) cons
       target_v = 6;
     }
     if (change_stretch_mode) {
-      ceph_assert(target_v >= 9);
       target_v = std::max((uint8_t)10, target_v);
     }
     ENCODE_START(target_v, 1, bl); // extended, osd-only data
@@ -5227,7 +5228,7 @@ protected:
   }
 
   void dump_item(const CrushTreeDumper::Item &qi, F *f) override {
-    if (!tree && qi.is_bucket())
+    if (!tree && (qi.is_bucket() || dumped_osds.count(qi.id)))
       return;
     if (!should_dump(qi.id))
       return;
@@ -5315,7 +5316,7 @@ protected:
     *kb_used_meta = p->statfs.kb_used_internal_metadata();
     *kb_avail = p->statfs.kb_avail();
     
-    return *kb > 0;
+    return true;
   }
 
   bool get_bucket_utilization(int id, int64_t* kb, int64_t* kb_used,
@@ -5359,7 +5360,7 @@ protected:
       *kb_used_meta += kb_used_meta_i;
       *kb_avail += kb_avail_i;
     }
-    return *kb > 0;
+    return true;
   }
 
 protected:
@@ -5640,7 +5641,7 @@ void OSDMap::check_health(CephContext *cct,
         }
 	continue;
       }
-      if (is_out(i))
+      if (is_out(i) || (osd_state[i] & CEPH_OSD_NEW))
         continue;
       ++num_in_osds;
       if (down_in_osds.count(i) || up_in_osds.count(i))

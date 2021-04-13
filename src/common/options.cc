@@ -4,6 +4,7 @@
 #include "acconfig.h"
 #include "options.h"
 #include "common/Formatter.h"
+#include "common/options/build_options.h"
 
 // Helpers for validators
 #include "include/stringify.h"
@@ -15,8 +16,9 @@
 // Definitions for enums
 #include "common/perf_counters.h"
 
-// rbd feature validation
+// rbd feature and io operation validation
 #include "librbd/Features.h"
+#include "librbd/io/IoOperations.h"
 
 using std::ostream;
 using std::ostringstream;
@@ -177,7 +179,7 @@ int Option::parse_value(
     }
   } else if (type == Option::TYPE_ADDR) {
     entity_addr_t addr;
-    if (!addr.parse(val.c_str())){
+    if (!addr.parse(val)){
       return -EINVAL;
     }
     *out = addr;
@@ -334,6 +336,7 @@ void Option::print(ostream *out) const
     *out << "\n" << long_desc << "\n";
   }
 }
+
 
 constexpr unsigned long long operator"" _min (unsigned long long min) {
   return min * 60;

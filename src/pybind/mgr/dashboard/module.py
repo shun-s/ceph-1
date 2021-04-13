@@ -16,7 +16,7 @@ import threading
 import time
 from typing import Optional
 
-from mgr_module import CLIWriteCommand, MgrModule, MgrStandbyModule, Option
+from mgr_module import CLIWriteCommand, MgrModule, MgrStandbyModule, Option, _get_localized_key
 from mgr_util import ServerConfigException, create_self_signed_cert, \
     get_default_addr, verify_tls_files
 
@@ -146,7 +146,7 @@ class CherryPyConfig(object):
 
         if use_ssl:
             # SSL initialization
-            cert = self.get_store("crt")  # type: ignore
+            cert = self.get_localized_store("crt")  # type: ignore
             if cert is not None:
                 self.cert_tmp = tempfile.NamedTemporaryFile()
                 self.cert_tmp.write(cert.encode('utf-8'))
@@ -155,7 +155,7 @@ class CherryPyConfig(object):
             else:
                 cert_fname = self.get_localized_module_option('crt_file')  # type: ignore
 
-            pkey = self.get_store("key")  # type: ignore
+            pkey = self.get_localized_store("key")  # type: ignore
             if pkey is not None:
                 self.pkey_tmp = tempfile.NamedTemporaryFile()
                 self.pkey_tmp.write(pkey.encode('utf-8'))
@@ -251,9 +251,7 @@ class Module(MgrModule, CherryPyConfig):
         Option(name='server_port', type='int', default=8080),
         Option(name='ssl_server_port', type='int', default=8443),
         Option(name='jwt_token_ttl', type='int', default=28800),
-        Option(name='password', type='str', default=''),
         Option(name='url_prefix', type='str', default=''),
-        Option(name='username', type='str', default=''),
         Option(name='key_file', type='str', default=''),
         Option(name='crt_file', type='str', default=''),
         Option(name='ssl', type='bool', default=True),
@@ -367,9 +365,9 @@ class Module(MgrModule, CherryPyConfig):
             return -errno.EINVAL, '',\
                 'Please specify the certificate file with "-i" option'
         if mgr_id is not None:
-            self.set_store('{}/crt'.format(mgr_id), inbuf)
+            self.set_store(_get_localized_key(mgr_id, 'crt'), inbuf.decode())
         else:
-            self.set_store('crt', inbuf)
+            self.set_store('crt', inbuf.decode())
         return 0, 'SSL certificate updated', ''
 
     @CLIWriteCommand("dashboard set-ssl-certificate-key")
@@ -380,9 +378,9 @@ class Module(MgrModule, CherryPyConfig):
             return -errno.EINVAL, '',\
                 'Please specify the certificate key file with "-i" option'
         if mgr_id is not None:
-            self.set_store('{}/key'.format(mgr_id), inbuf)
+            self.set_store(_get_localized_key(mgr_id, 'key'), inbuf.decode())
         else:
-            self.set_store('key', inbuf)
+            self.set_store('key', inbuf.decode())
         return 0, 'SSL certificate key updated', ''
 
     def handle_command(self, inbuf, cmd):

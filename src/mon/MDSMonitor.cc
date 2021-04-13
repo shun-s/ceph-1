@@ -665,7 +665,6 @@ bool MDSMonitor::prepare_beacon(MonOpRequestRef op)
       new_info.mds_features = m->get_mds_features();
       new_info.state = MDSMap::STATE_STANDBY;
       new_info.state_seq = seq;
-      pending.insert(new_info);
       if (m->get_fs().size()) {
 	fs_cluster_id_t fscid = FS_CLUSTER_ID_NONE;
 	auto f = pending.get_filesystem(m->get_fs());
@@ -674,6 +673,7 @@ bool MDSMonitor::prepare_beacon(MonOpRequestRef op)
 	}
         new_info.join_fscid = fscid;
       }
+      pending.insert(new_info);
     }
 
     // initialize the beacon timer
@@ -1232,11 +1232,6 @@ bool MDSMonitor::fail_mds_gid(FSMap &fsmap, mds_gid_t gid)
 {
   const auto& info = fsmap.get_info_gid(gid);
   dout(1) << "fail_mds_gid " << gid << " mds." << info.name << " role " << info.rank << dendl;
-
-  if (info.is_frozen()) {
-    dout(1) << "mds is frozen" << dendl;
-    return false;
-  }
 
   ceph_assert(mon.osdmon()->is_writeable());
 
@@ -2000,10 +1995,7 @@ bool MDSMonitor::maybe_resize_cluster(FSMap &fsmap, fs_cluster_id_t fscid)
   } else if (in > max) {
     mds_rank_t target = in - 1;
     const auto &info = mds_map.get_info(target);
-    if (info.is_frozen()) {
-      dout(1) << "highest rank is frozen" << dendl;
-      return false;
-    } else if (mds_map.is_active(target)) {
+    if (mds_map.is_active(target)) {
       dout(1) << "stopping " << target << dendl;
       mon.clog->info() << "stopping " << info.human_name();
       auto f = [](auto& info) {
@@ -2248,7 +2240,7 @@ bool MDSMonitor::maybe_promote_standby(FSMap &fsmap, Filesystem& fs)
     }
   }
 
-  if (!fs.mds_map.is_degraded() && fs.mds_map.allows_standby_replay()) {
+  if (fs.mds_map.is_resizeable() && fs.mds_map.allows_standby_replay()) {
     // There were no failures to replace, so try using any available standbys
     // as standby-replay daemons. Don't do this when the cluster is degraded
     // as a standby-replay daemon may try to read a journal being migrated.

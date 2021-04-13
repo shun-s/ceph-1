@@ -42,6 +42,11 @@ wnbdTag="master"
 wnbdSrcDir="${depsSrcDir}/wnbd"
 wnbdLibDir="${depsToolsetDir}/wnbd/lib"
 
+dokanUrl="https://github.com/dokan-dev/dokany"
+dokanTag="v1.3.1.1000"
+dokanSrcDir="${depsSrcDir}/dokany"
+dokanLibDir="${depsToolsetDir}/dokany/lib"
+
 # Allow for OS specific customizations through the OS flag (normally
 # passed through from win32_build).
 # Valid options are currently "ubuntu" and "suse".
@@ -63,14 +68,16 @@ mkdir -p $depsSrcDir
 case "$OS" in
     ubuntu)
         sudo apt-get update
-        sudo apt-get -y install mingw-w64 cmake pkg-config python3-dev python3-pip \
+        sudo apt-get -y install mingw-w64 cmake pkg-config \
+            python3-dev python3-pip python3-yaml \
                 autoconf libtool ninja-build zip
         sudo python3 -m pip install cython
         ;;
     suse)
         for PKG in mingw64-cross-gcc-c++ mingw64-libgcc_s_seh1 mingw64-libstdc++6 \
                 cmake pkgconf python3-devel autoconf libtool ninja zip \
-                python3-Cython gcc patch wget git; do
+                python3-Cython python3-PyYAML \
+                gcc patch wget git; do
             rpm -q $PKG >/dev/null || zypper -n install $PKG
         done
         ;;
@@ -301,11 +308,12 @@ EOL
 
 ./b2 install --user-config=user-config.jam toolset=gcc-mingw32 \
     target-os=windows release \
+    link=static,shared \
     threadapi=pthread --prefix=$boostDir \
     address-model=64 architecture=x86 \
     binary-format=pe abi=ms -j $NUM_WORKERS \
     -sZLIB_INCLUDE=$zlibDir/include -sZLIB_LIBRARY_PATH=$zlibDir/lib \
-    --without-python --without-mpi
+    --without-python --without-mpi --without-log --without-wave
 
 cd $depsSrcDir
 if [[ ! -d $backtraceSrcDir ]]; then
@@ -391,5 +399,20 @@ $MINGW_DLLTOOL -d $wnbdSrcDir/libwnbd/libwnbd.def \
                -D libwnbd.dll \
                -l $wnbdLibDir/libwnbd.a
 
+cd $depsSrcDir
+if [[ ! -d $dokanSrcDir ]]; then
+    git clone $dokanUrl
+fi
+cd $dokanSrcDir
+git checkout $dokanTag
+
+mkdir -p $dokanLibDir
+$MINGW_DLLTOOL -d $dokanSrcDir/dokan/dokan.def \
+               -l $dokanLibDir/libdokan.a
+
+# That's probably the easiest way to deal with the dokan imports.
+# dokan.h is defined in both ./dokan and ./sys while both are using
+# sys/public.h without the "sys" prefix.
+cp $dokanSrcDir/sys/public.h $dokanSrcDir/dokan
 
 touch $depsToolsetDir/completed

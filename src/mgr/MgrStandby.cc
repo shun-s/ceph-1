@@ -41,7 +41,8 @@ MgrStandby::MgrStandby(int argc, const char **argv) :
   monc{g_ceph_context, poolctx},
   client_messenger(Messenger::create(
 		     g_ceph_context,
-		     cct->_conf.get_val<std::string>("ms_type"),
+		     cct->_conf.get_val<std::string>("ms_public_type").empty() ?
+			cct->_conf.get_val<std::string>("ms_type") : cct->_conf.get_val<std::string>("ms_public_type"),
 		     entity_name_t::MGR(),
 		     "mgr",
 		     Messenger::get_pid_nonce())),
@@ -137,9 +138,7 @@ int MgrStandby::init()
       // dout(10) << "config_callback: " << k << " : " << v << dendl;
       dout(10) << "config_callback: " << k << " : " << dendl;
       if (k.substr(0, 4) == "mgr/") {
-	const std::string global_key = PyModule::config_prefix + k.substr(4);
-        py_module_registry.handle_config(global_key, v);
-
+        py_module_registry.handle_config(k, v);
 	return true;
       }
       return false;

@@ -99,7 +99,6 @@ enum {
   l_mon_last,
 };
 
-class ConfigKeyService;
 class PaxosService;
 
 class AdminSocketHook;
@@ -260,6 +259,9 @@ private:
   bool session_stretch_allowed(MonSession *s, MonOpRequestRef& op);
   void disconnect_disallowed_stretch_sessions();
   void set_elector_disallowed_leaders(bool allow_election);
+
+  map <string,string> crush_loc;
+  bool need_set_crush_loc{false};
 public:
   bool is_stretch_mode() { return stretch_mode_engaged; }
   bool is_degraded_stretch_mode() { return degraded_stretch_mode; }
@@ -273,6 +275,7 @@ public:
   void trigger_healthy_stretch_mode();
   void set_healthy_stretch_mode();
   void enable_stretch_mode();
+  void set_mon_crush_location(const string& loc);
 
   
 private:
@@ -678,14 +681,16 @@ public:
     return (class ConfigMonitor*) paxos_service[PAXOS_CONFIG].get();
   }
 
+  class KVMonitor *kvmon() {
+    return (class KVMonitor*) paxos_service[PAXOS_KV].get();
+  }
+
   friend class Paxos;
   friend class OSDMonitor;
   friend class MDSMonitor;
   friend class MonmapMonitor;
   friend class LogMonitor;
-  friend class ConfigKeyService;
-
-  std::unique_ptr<ConfigKeyService> config_key_service;
+  friend class KVMonitor;
 
   // -- sessions --
   MonSessionMap session_map;
@@ -839,7 +844,10 @@ public:
   void waitlist_or_zap_client(MonOpRequestRef op);
 
   void send_mon_message(Message *m, int rank);
-  void notify_new_monmap();
+  /** can_change_external_state if we can do things like
+   *  call elections as a result of the new map.
+   */
+  void notify_new_monmap(bool can_change_external_state=false);
 
 public:
   struct C_Command : public C_MonOp {
@@ -1077,6 +1085,7 @@ public:
 #define CEPH_MON_FEATURE_INCOMPAT_NAUTILUS CompatSet::Feature(11, "nautilus ondisk layout")
 #define CEPH_MON_FEATURE_INCOMPAT_OCTOPUS CompatSet::Feature(12, "octopus ondisk layout")
 #define CEPH_MON_FEATURE_INCOMPAT_PACIFIC CompatSet::Feature(13, "pacific ondisk layout")
+#define CEPH_MON_FEATURE_INCOMPAT_QUINCY CompatSet::Feature(14, "quincy ondisk layout")
 // make sure you add your feature to Monitor::get_supported_features
 
 

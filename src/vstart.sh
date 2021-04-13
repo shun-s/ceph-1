@@ -22,12 +22,12 @@ debug() {
 
 prunb() {
     debug quoted_print "$@" '&'
-    "$@" &
+    PATH=$CEPH_BIN:$PATH "$@" &
 }
 
 prun() {
     debug quoted_print "$@"
-    "$@"
+    PATH=$CEPH_BIN:$PATH "$@"
 }
 
 
@@ -1036,7 +1036,7 @@ EOF
 	if [ "$new" -eq 1 ]; then
 		digest=$(curl -s \
 		https://registry.hub.docker.com/v2/repositories/ceph/daemon-base/tags/latest-master-devel \
-		| jq -r '.images[].digest')
+		| jq -r '.images[0].digest')
 		ceph_adm config set global container_image "docker.io/ceph/daemon-base@$digest"
 	fi
         ceph_adm config-key set mgr/cephadm/ssh_identity_key -i ~/.ssh/id_rsa
@@ -1126,7 +1126,7 @@ start_ganesha() {
     cluster_id="vstart"
     GANESHA_PORT=$(($CEPH_PORT + 4000))
     local ganesha=0
-    test_user="ganesha-$cluster_id"
+    test_user="$cluster_id"
     pool_name="nfs-ganesha"
     namespace=$cluster_id
     url="rados://$pool_name/$namespace/conf-nfs.$test_user"
@@ -1169,8 +1169,6 @@ start_ganesha() {
            Minor_Versions = 1, 2;
         }
 
-        %url $url
-
         RADOS_KV {
            pool = $pool_name;
            namespace = $namespace;
@@ -1180,8 +1178,10 @@ start_ganesha() {
 
         RADOS_URLS {
 	   Userid = $test_user;
-	   watch_url = \"$url\";
-        }" > "$ganesha_dir/ganesha-$name.conf"
+	   watch_url = '$url';
+        }
+
+	%url $url" > "$ganesha_dir/ganesha-$name.conf"
 	wconf <<EOF
 [ganesha.$name]
         host = $HOSTNAME

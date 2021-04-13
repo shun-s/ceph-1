@@ -16,7 +16,6 @@
 #include "test/librbd/mock/MockReadahead.h"
 #include "test/librbd/mock/io/MockImageDispatcher.h"
 #include "test/librbd/mock/io/MockObjectDispatcher.h"
-#include "common/RWLock.h"
 #include "common/WorkQueue.h"
 #include "common/zipkin_trace.h"
 #include "librbd/ImageCtx.h"
@@ -214,6 +213,7 @@ struct MockImageCtx {
   MOCK_METHOD1(notify_update, void(Context *));
 
   MOCK_CONST_METHOD0(get_exclusive_lock_policy, exclusive_lock::Policy*());
+  MOCK_METHOD1(set_exclusive_lock_policy, void(exclusive_lock::Policy*));
   MOCK_CONST_METHOD0(get_journal_policy, journal::Policy*());
   MOCK_METHOD1(set_journal_policy, void(journal::Policy*));
 
@@ -316,6 +316,8 @@ struct MockImageCtx {
   MockJournal *journal;
 
   ZTracer::Endpoint trace_endpoint;
+
+  crypto::CryptoInterface* crypto = nullptr;
 
   uint64_t sparse_read_threshold_bytes;
   uint32_t discard_granularity_bytes;

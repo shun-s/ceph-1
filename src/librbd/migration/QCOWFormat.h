@@ -8,6 +8,7 @@
 #include "librbd/Types.h"
 #include "librbd/migration/FormatInterface.h"
 #include "librbd/migration/QCOW.h"
+#include "acconfig.h"
 #include "json_spirit/json_spirit.h"
 #include <boost/asio/io_context_strand.hpp>
 #include <boost/iostreams/filter/zlib.hpp>
@@ -26,6 +27,23 @@ namespace migration {
 
 template <typename> struct SourceSpecBuilder;
 struct StreamInterface;
+
+namespace qcow_format {
+
+struct LookupTable {
+  LookupTable() {}
+  LookupTable(uint32_t size) : size(size) {}
+
+  bufferlist bl;
+  uint64_t* cluster_offsets = nullptr;
+  uint32_t size = 0;
+  bool decoded = false;
+
+  void init();
+  void decode();
+};
+
+} // namespace qcow_format
 
 template <typename ImageCtxT>
 class QCOWFormat : public FormatInterface {
@@ -114,10 +132,8 @@ private:
     utime_t timestamp;
     uint64_t size = 0;
 
-    uint32_t l1_size = 0;
     uint64_t l1_table_offset = 0;
-    uint64_t* l1_table = nullptr;
-    bufferlist l1_table_bl;
+    qcow_format::LookupTable l1_table;
 
     uint32_t extra_data_size = 0;
   };
@@ -141,10 +157,12 @@ private:
   uint64_t m_cluster_offset_mask = 0;
   uint64_t m_cluster_mask = 0;
 
-  uint32_t m_l1_size = 0;
+  uint32_t m_l1_shift = 0;
   uint64_t m_l1_table_offset = 0;
-  uint64_t* m_l1_table = nullptr;
-  bufferlist m_l1_table_bl;
+  qcow_format::LookupTable m_l1_table;
+
+  uint32_t m_l2_bits = 0;
+  uint32_t m_l2_size = 0;
 
   uint32_t m_snapshot_count = 0;
   uint64_t m_snapshots_offset = 0;
@@ -158,8 +176,10 @@ private:
   void probe(Context* on_finish);
   void handle_probe(int r, Context* on_finish);
 
+#ifdef WITH_RBD_MIGRATION_FORMAT_QCOW_V1
   void read_v1_header(Context* on_finish);
   void handle_read_v1_header(int r, Context* on_finish);
+#endif // WITH_RBD_MIGRATION_FORMAT_QCOW_V1
 
   void read_v2_header(Context* on_finish);
   void handle_read_v2_header(int r, Context* on_finish);
@@ -178,7 +198,8 @@ private:
 
   void read_backing_file(Context* on_finish);
 
-  void handle_list_snaps(int r, io::SnapIds&& snap_ids,
+  void handle_list_snaps(int r, io::Extents&& image_extents,
+                         io::SnapIds&& snap_ids,
                          io::SnapshotDelta* snapshot_delta, Context* on_finish);
 };
 

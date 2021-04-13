@@ -30,6 +30,10 @@ add_definitions(
   -D__STDC_FORMAT_MACROS
   -D_FILE_OFFSET_BITS=64
   -DBOOST_ASIO_DISABLE_THREAD_KEYWORD_EXTENSION)
+if(Boost_VERSION VERSION_GREATER_EQUAL 1.74)
+  add_definitions(-DBOOST_ASIO_USE_TS_EXECUTOR_AS_DEFAULT)
+endif()
+
 if(LINUX)
   add_definitions("-D_GNU_SOURCE")
 endif()
@@ -64,7 +68,7 @@ endif()
 if(CMAKE_CXX_COMPILER_ID STREQUAL GNU)
   if(MINGW)
     # The MINGW headers are missing some "const" qualifiers.
-    add_compile_options($<$<OR:$<COMPILE_LANGUAGE:C>,$<COMPILE_LANGUAGE:CXX>>:-fpermissive>)
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fpermissive>)
   else()
     string(APPEND CMAKE_EXE_LINKER_FLAGS " -rdynamic")
   endif()
@@ -113,7 +117,7 @@ if(NOT CMAKE_BUILD_TYPE)
       STRING "Default BUILD_TYPE is Debug, other options are: RelWithDebInfo, Release, and MinSizeRel." FORCE)
 endif()
 
-if(WITH_CEPH_DEBUG_MUTEX OR CMAKE_BUILD_TYPE STREQUAL Debug)
+if(WITH_CEPH_DEBUG_MUTEX)
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-DCEPH_DEBUG_MUTEX>)
 endif()
 
@@ -187,7 +191,9 @@ set(DIAGNOSTICS_COLOR "auto"
   CACHE STRING "Used if the C/C++ compiler supports the -fdiagnostics-color option. May have one of three values -- 'auto' (default), 'always', or 'never'. If set to 'always' and the compiler supports the option, 'make [...] | less -R' will make visible diagnostics colorization of compiler output.")
 
 if(COMPILER_SUPPORTS_DIAGNOSTICS_COLOR)
-  add_compile_options(-fdiagnostics-color=${DIAGNOSTICS_COLOR})
+  add_compile_options(
+    "$<$<COMPILE_LANGUAGE:C>:-fdiagnostics-color=${DIAGNOSTICS_COLOR}>"
+    "$<$<COMPILE_LANGUAGE:CXX>:-fdiagnostics-color=${DIAGNOSTICS_COLOR}>")
 endif()
 
 set(EXTRALIBS ${CMAKE_DL_LIBS})
@@ -385,6 +391,7 @@ set(libcommon_files
   osdc/Objecter.cc
   osdc/error_code.cc
   librbd/Features.cc
+  librbd/io/IoOperations.cc
   ${mds_files})
 if(WITH_JAEGER)
   list(APPEND libcommon_files common/tracer.cc)
@@ -440,6 +447,7 @@ add_subdirectory(arch)
 set(ceph_common_objs
   $<TARGET_OBJECTS:common-auth-objs>
   $<TARGET_OBJECTS:common-common-objs>
+  $<TARGET_OBJECTS:common-options-objs>
   $<TARGET_OBJECTS:common-msg-objs>
   $<TARGET_OBJECTS:common_buffer_obj>
   $<TARGET_OBJECTS:common_texttable_obj>
@@ -456,7 +464,6 @@ set(ceph_common_deps
   Boost::program_options
   Boost::date_time
   Boost::iostreams
-  fmt::fmt
   StdFilesystem::filesystem
   fmt::fmt
   ${BLKID_LIBRARIES}
@@ -501,12 +508,14 @@ endif()
 
 if(WITH_BLUESTORE_PMEM OR WITH_RBD_RWL)
   if(WITH_SYSTEM_PMDK)
+    set(pmem_COMPONENTS)
     if(WITH_BLUESTORE_PMEM)
-      find_package(pmem REQUIRED COMPONENTS pmem)
+      list(APPEND pmem_COMPONENTS pmem)
     endif()
     if(WITH_RBD_RWL)
-      find_package(pmem REQUIRED COMPONENTS pmemobj)
+      list(APPEND pmem_COMPONENTS pmemobj)
     endif()
+    find_package(pmem 1.7 REQUIRED COMPONENTS ${pmem_COMPONENTS})
   else()
     include(Buildpmem)
     build_pmem()
@@ -800,6 +809,20 @@ if(WITH_LIBCEPHFS)
   endif()
 endif(WITH_LIBCEPHFS)
 
+if(WITH_LIBCEPHSQLITE)
+  set(cephsqlite_srcs libcephsqlite.cc SimpleRADOSStriper.cc)
+  add_library(cephsqlite ${CEPH_SHARED} ${cephsqlite_srcs})
+  target_link_libraries(cephsqlite PRIVATE cls_lock_client librados ceph-common SQLite3::SQLite3 ${EXTRALIBS})
+  set_target_properties(cephsqlite PROPERTIES
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON)
+  if(NOT APPLE AND NOT WIN32)
+    set_property(TARGET cephsqlite APPEND_STRING PROPERTY
+      LINK_FLAGS " -Wl,--exclude-libs,ALL")
+  endif()
+  install(TARGETS cephsqlite DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endif(WITH_LIBCEPHSQLITE)
+
 if(WITH_FUSE)
   set(ceph_fuse_srcs
     ceph_fuse.cc
@@ -812,6 +835,10 @@ if(WITH_FUSE)
   install(TARGETS ceph-fuse DESTINATION bin)
   install(PROGRAMS mount.fuse.ceph DESTINATION ${CMAKE_INSTALL_SBINDIR})
 endif(WITH_FUSE)
+
+if(WITH_DOKAN)
+  add_subdirectory(dokan)
+endif(WITH_DOKAN)
 
 add_subdirectory(journal)
 
@@ -844,6 +871,8 @@ if(WITH_KVS)
 endif(WITH_KVS)
 
 if(WITH_RADOSGW)
+  add_subdirectory(libkmip)
+
   set(civetweb_common_files civetweb/src/civetweb.c)
   add_library(civetweb_common_objs OBJECT ${civetweb_common_files})
   target_include_directories(civetweb_common_objs SYSTEM PRIVATE
@@ -928,6 +957,7 @@ add_custom_target(cephfs_testing DEPENDS
     cls_cephfs
     ceph-fuse
     ceph-dencoder
+    ceph-dencoder-modules
     cephfs-journal-tool
     cephfs-meta-injection
     cephfs-data-scan

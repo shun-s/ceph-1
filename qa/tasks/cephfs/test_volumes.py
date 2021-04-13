@@ -698,7 +698,7 @@ class TestSubvolumeGroups(TestVolumesHelper):
         group = "pinme"
         self._fs_cmd("subvolumegroup", "create", self.volname, group)
         self._fs_cmd("subvolumegroup", "pin", self.volname, group, "distributed", "True")
-        subvolumes = self._generate_random_subvolume_name(10)
+        subvolumes = self._generate_random_subvolume_name(50)
         for subvolume in subvolumes:
             self._fs_cmd("subvolume", "create", self.volname, subvolume, "--group_name", group)
         self._wait_distributed_subtrees(2 * 2, status=status, rank="all")
@@ -1350,7 +1350,7 @@ class TestSubvolumes(TestVolumesHelper):
         # for different subvolumes, versioning details, etc.
         expected_auth_metadata = {
             "version": 5,
-            "compat_version": 1,
+            "compat_version": 6,
             "dirty": False,
             "tenant_id": "tenant1",
             "subvolumes": {
@@ -1441,7 +1441,7 @@ class TestSubvolumes(TestVolumesHelper):
         # list authorized-ids of the subvolume
         expected_auth_list = [{'alice': 'rw'}, {'guest1': 'rw'}, {'guest2': 'r'}]
         auth_list = json.loads(self._fs_cmd('subvolume', 'authorized_list', self.volname, subvolume, "--group_name", group))
-        self.assertListEqual(auth_list, expected_auth_list)
+        self.assertCountEqual(expected_auth_list, auth_list)
 
         # cleanup
         self._fs_cmd("subvolume", "deauthorize", self.volname, subvolume, authid1,
@@ -1626,7 +1626,7 @@ class TestSubvolumes(TestVolumesHelper):
         # created on authorizing 'guest1' access to the subvolume.
         auth_metadata_filename = "${0}.meta".format(guestclient_1["auth_id"])
         self.assertIn(auth_metadata_filename, guest_mount.ls("volumes"))
-        expected_auth_metadata_content = self.mount_a.run_shell(['cat', 'volumes/{0}'.format(auth_metadata_filename)]).stdout.getvalue().strip()
+        expected_auth_metadata_content = self._auth_metadata_get(self.mount_a.read_file("volumes/{0}".format(auth_metadata_filename)))
 
         # Induce partial auth update state by modifying the auth metadata file,
         # and then run authorize again.
@@ -1636,7 +1636,7 @@ class TestSubvolumes(TestVolumesHelper):
         self._fs_cmd("subvolume", "authorize", self.volname, subvolume, guestclient_1["auth_id"],
                      "--group_name", group, "--tenant_id", guestclient_1["tenant_id"])
 
-        auth_metadata_content = self.mount_a.run_shell(['cat', 'volumes/{0}'.format(auth_metadata_filename)]).stdout.getvalue().strip()
+        auth_metadata_content = self._auth_metadata_get(self.mount_a.read_file("volumes/{0}".format(auth_metadata_filename)))
         self.assertEqual(auth_metadata_content, expected_auth_metadata_content)
 
         # clean up
@@ -1678,7 +1678,7 @@ class TestSubvolumes(TestVolumesHelper):
         # created on authorizing 'guest1' access to the subvolume1.
         auth_metadata_filename = "${0}.meta".format(guestclient_1["auth_id"])
         self.assertIn(auth_metadata_filename, guest_mount.ls("volumes"))
-        expected_auth_metadata_content = self.mount_a.run_shell(['cat', 'volumes/{0}'.format(auth_metadata_filename)]).stdout.getvalue().strip()
+        expected_auth_metadata_content = self._auth_metadata_get(self.mount_a.read_file("volumes/{0}".format(auth_metadata_filename)))
 
         # Authorize 'guestclient_1' to access the subvolume2.
         self._fs_cmd("subvolume", "authorize", self.volname, subvolume2, guestclient_1["auth_id"],
@@ -1692,7 +1692,7 @@ class TestSubvolumes(TestVolumesHelper):
         self._fs_cmd("subvolume", "deauthorize", self.volname, subvolume2, guestclient_1["auth_id"],
                      "--group_name", group)
 
-        auth_metadata_content = self.mount_a.run_shell(['cat', 'volumes/{0}'.format(auth_metadata_filename)]).stdout.getvalue().strip()
+        auth_metadata_content = self._auth_metadata_get(self.mount_a.read_file("volumes/{0}".format(auth_metadata_filename)))
         self.assertEqual(auth_metadata_content, expected_auth_metadata_content)
 
         # clean up
@@ -1747,7 +1747,7 @@ class TestSubvolumes(TestVolumesHelper):
 
         expected_auth_metadata = {
             "version": 5,
-            "compat_version": 1,
+            "compat_version": 6,
             "dirty": False,
             "tenant_id": "tenant1",
             "subvolumes": {
@@ -1824,7 +1824,7 @@ class TestSubvolumes(TestVolumesHelper):
 
         expected_auth_metadata = {
             "version": 5,
-            "compat_version": 1,
+            "compat_version": 6,
             "dirty": False,
             "tenant_id": "tenant1",
             "subvolumes": {
@@ -1848,6 +1848,75 @@ class TestSubvolumes(TestVolumesHelper):
         self.fs.mon_manager.raw_cluster_cmd("auth", "rm", "client.guest1")
         self._fs_cmd("subvolume", "rm", self.volname, subvolume1, "--group_name", group)
         self._fs_cmd("subvolume", "rm", self.volname, subvolume2, "--group_name", group)
+        self._fs_cmd("subvolumegroup", "rm", self.volname, group)
+
+    def test_subvolume_evict_client(self):
+        """
+        That a subvolume client can be evicted based on the auth ID
+        """
+
+        subvolumes = self._generate_random_subvolume_name(2)
+        group = self._generate_random_group_name()
+
+        # create group
+        self._fs_cmd("subvolumegroup", "create", self.volname, group)
+
+        # mounts[0] and mounts[1] would be used as guests to mount the volumes/shares.
+        for i in range(0, 2):
+            self.mounts[i].umount_wait()
+        guest_mounts = (self.mounts[0], self.mounts[1])
+        auth_id = "guest"
+        guestclient_1 = {
+            "auth_id": auth_id,
+            "tenant_id": "tenant1",
+        }
+
+        # Create two subvolumes. Authorize 'guest' auth ID to mount the two
+        # subvolumes. Mount the two subvolumes. Write data to the volumes.
+        for i in range(2):
+            # Create subvolume.
+            self._fs_cmd("subvolume", "create", self.volname, subvolumes[i], "--group_name", group)
+
+            # authorize guest authID read-write access to subvolume
+            key = self._fs_cmd("subvolume", "authorize", self.volname, subvolumes[i], guestclient_1["auth_id"],
+                               "--group_name", group, "--tenant_id", guestclient_1["tenant_id"])
+
+            mount_path = self._fs_cmd("subvolume", "getpath", self.volname, subvolumes[i],
+                                      "--group_name", group).rstrip()
+            # configure credentials for guest client
+            self._configure_guest_auth(guest_mounts[i], auth_id, key)
+
+            # mount the subvolume, and write to it
+            guest_mounts[i].mount(cephfs_mntpt=mount_path)
+            guest_mounts[i].write_n_mb("data.bin", 1)
+
+        # Evict client, guest_mounts[0], using auth ID 'guest' and has mounted
+        # one volume.
+        self._fs_cmd("subvolume", "evict", self.volname, subvolumes[0], auth_id, "--group_name", group)
+
+        # Evicted guest client, guest_mounts[0], should not be able to do
+        # anymore metadata ops.  It should start failing all operations
+        # when it sees that its own address is in the blocklist.
+        try:
+            guest_mounts[0].write_n_mb("rogue.bin", 1)
+        except CommandFailedError:
+            pass
+        else:
+            raise RuntimeError("post-eviction write should have failed!")
+
+        # The blocklisted guest client should now be unmountable
+        guest_mounts[0].umount_wait()
+
+        # Guest client, guest_mounts[1], using the same auth ID 'guest', but
+        # has mounted the other volume, should be able to use its volume
+        # unaffected.
+        guest_mounts[1].write_n_mb("data.bin.1", 1)
+
+        # Cleanup.
+        guest_mounts[1].umount_wait()
+        for i in range(2):
+            self._fs_cmd("subvolume", "deauthorize", self.volname, subvolumes[i], auth_id, "--group_name", group)
+            self._fs_cmd("subvolume", "rm", self.volname, subvolumes[i], "--group_name", group)
         self._fs_cmd("subvolumegroup", "rm", self.volname, group)
 
     def test_subvolume_pin_random(self):
@@ -3600,6 +3669,48 @@ class TestSubvolumeSnapshotClones(TestVolumesHelper):
 
         # do some IO
         self._do_subvolume_io(subvolume, number_of_files=64)
+
+        # snapshot subvolume
+        self._fs_cmd("subvolume", "snapshot", "create", self.volname, subvolume, snapshot)
+
+        # schedule a clone
+        self._fs_cmd("subvolume", "snapshot", "clone", self.volname, subvolume, snapshot, clone)
+
+        # check clone status
+        self._wait_for_clone_to_complete(clone)
+
+        # verify clone
+        self._verify_clone(subvolume, snapshot, clone)
+
+        # remove snapshot
+        self._fs_cmd("subvolume", "snapshot", "rm", self.volname, subvolume, snapshot)
+
+        # remove subvolumes
+        self._fs_cmd("subvolume", "rm", self.volname, subvolume)
+        self._fs_cmd("subvolume", "rm", self.volname, clone)
+
+        # verify trash dir is clean
+        self._wait_for_trash_empty()
+
+    def test_subvolume_snapshot_clone_retain_suid_guid(self):
+        subvolume = self._generate_random_subvolume_name()
+        snapshot = self._generate_random_snapshot_name()
+        clone = self._generate_random_clone_name()
+
+        # create subvolume
+        self._fs_cmd("subvolume", "create", self.volname, subvolume)
+
+        # Create a file with suid, guid bits set along with executable bit.
+        args = ["subvolume", "getpath", self.volname, subvolume]
+        args = tuple(args)
+        subvolpath = self._fs_cmd(*args)
+        self.assertNotEqual(subvolpath, None)
+        subvolpath = subvolpath[1:].rstrip() # remove "/" prefix and any trailing newline
+
+        file_path = subvolpath
+        file_path = os.path.join(subvolpath, "test_suid_file")
+        self.mount_a.run_shell(["touch", file_path])
+        self.mount_a.run_shell(["chmod", "u+sx,g+sx", file_path])
 
         # snapshot subvolume
         self._fs_cmd("subvolume", "snapshot", "create", self.volname, subvolume, snapshot)

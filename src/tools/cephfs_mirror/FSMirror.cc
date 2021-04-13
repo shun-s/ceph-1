@@ -13,6 +13,7 @@
 #include "FSMirror.h"
 #include "PeerReplayer.h"
 #include "aio_utils.h"
+#include "ServiceDaemon.h"
 #include "Utils.h"
 
 #include "common/Cond.h"
@@ -26,6 +27,10 @@ namespace cephfs {
 namespace mirror {
 
 namespace {
+
+const std::string SERVICE_DAEMON_DIR_COUNT_KEY("directory_count");
+const std::string SERVICE_DAEMON_PEER_INIT_FAILED_KEY("peer_init_failed");
+
 class MirrorAdminSocketCommand {
 public:
   virtual ~MirrorAdminSocketCommand() {
@@ -87,14 +92,18 @@ private:
 };
 
 FSMirror::FSMirror(CephContext *cct, const Filesystem &filesystem, uint64_t pool_id,
-                   std::vector<const char*> args, ContextWQ *work_queue)
+                   ServiceDaemon *service_daemon, std::vector<const char*> args,
+                   ContextWQ *work_queue)
   : m_cct(cct),
     m_filesystem(filesystem),
     m_pool_id(pool_id),
+    m_service_daemon(service_daemon),
     m_args(args),
     m_work_queue(work_queue),
     m_snap_listener(this),
     m_asok_hook(new MirrorAdminSocketHook(cct, filesystem, this)) {
+  m_service_daemon->add_or_update_fs_attribute(m_filesystem.fscid, SERVICE_DAEMON_DIR_COUNT_KEY,
+                                               (uint64_t)0);
 }
 
 FSMirror::~FSMirror() {
@@ -104,7 +113,6 @@ FSMirror::~FSMirror() {
     std::scoped_lock locker(m_lock);
     delete m_instance_watcher;
     delete m_mirror_watcher;
-    m_cluster.reset();
   }
   // outside the lock so that in-progress commands can acquire
   // lock and finish executing.
@@ -123,6 +131,7 @@ void FSMirror::shutdown_replayer(PeerReplayer *peer_replayer) {
 void FSMirror::cleanup() {
   dout(20) << dendl;
   ceph_unmount(m_mount);
+  ceph_release(m_mount);
   m_ioctx.close();
   m_cluster.reset();
 }
@@ -134,12 +143,14 @@ void FSMirror::init(Context *on_finish) {
   int r = connect(g_ceph_context->_conf->name.to_str(),
                   g_ceph_context->_conf->cluster, &m_cluster);
   if (r < 0) {
+    m_init_failed = true;
     on_finish->complete(r);
     return;
   }
 
   r = m_cluster->ioctx_create2(m_pool_id, m_ioctx);
   if (r < 0) {
+    m_init_failed = true;
     m_cluster.reset();
     derr << ": error accessing local pool (id=" << m_pool_id << "): "
          << cpp_strerror(r) << dendl;
@@ -149,6 +160,7 @@ void FSMirror::init(Context *on_finish) {
 
   r = mount(m_cluster, m_filesystem, true, &m_mount);
   if (r < 0) {
+    m_init_failed = true;
     m_ioctx.close();
     m_cluster.reset();
     on_finish->complete(r);
@@ -170,13 +182,12 @@ void FSMirror::shutdown(Context *on_finish) {
     if (m_on_init_finish != nullptr) {
       dout(10) << ": delaying shutdown -- init in progress" << dendl;
       m_on_shutdown_finish = new LambdaContext([this, on_finish](int r) {
-                                                 cleanup();
                                                  if (r < 0) {
                                                    on_finish->complete(0);
                                                    return;
                                                  }
                                                  m_on_shutdown_finish = on_finish;
-                                                 shutdown_mirror_watcher();
+                                                 shutdown_peer_replayers();
                                                });
       return;
     }
@@ -184,11 +195,18 @@ void FSMirror::shutdown(Context *on_finish) {
     m_on_shutdown_finish = on_finish;
   }
 
+  shutdown_peer_replayers();
+}
+
+void FSMirror::shutdown_peer_replayers() {
+  dout(20) << dendl;
+
   for (auto &[peer, peer_replayer] : m_peer_replayers) {
-      dout(5) << ": shutting down replayer for peer=" << peer << dendl;
-      shutdown_replayer(peer_replayer.get());
+    dout(5) << ": shutting down replayer for peer=" << peer << dendl;
+    shutdown_replayer(peer_replayer.get());
   }
   m_peer_replayers.clear();
+
   shutdown_mirror_watcher();
 }
 
@@ -196,8 +214,11 @@ void FSMirror::init_instance_watcher(Context *on_finish) {
   dout(20) << dendl;
 
   m_on_init_finish = new LambdaContext([this, on_finish](int r) {
-                                         if (r < 0) {
-                                           m_init_failed = true;
+                                         {
+                                           std::scoped_lock locker(m_lock);
+                                           if (r < 0) {
+                                             m_init_failed = true;
+                                           }
                                          }
                                          on_finish->complete(r);
                                          if (m_on_shutdown_finish != nullptr) {
@@ -281,11 +302,13 @@ void FSMirror::shutdown_instance_watcher() {
   std::scoped_lock locker(m_lock);
   Context *ctx = new C_CallbackAdapter<
     FSMirror, &FSMirror::handle_shutdown_instance_watcher>(this);
-  m_instance_watcher->shutdown(ctx);
+  m_instance_watcher->shutdown(new C_AsyncCallback<ContextWQ>(m_work_queue, ctx));
 }
 
 void FSMirror::handle_shutdown_instance_watcher(int r) {
   dout(20) << ": r=" << r << dendl;
+
+  cleanup();
 
   Context *on_init_finish = nullptr;
   Context *on_shutdown_finish = nullptr;
@@ -307,24 +330,33 @@ void FSMirror::handle_shutdown_instance_watcher(int r) {
 void FSMirror::handle_acquire_directory(string_view dir_path) {
   dout(5) << ": dir_path=" << dir_path << dendl;
 
-  std::scoped_lock locker(m_lock);
-  m_directories.emplace(dir_path);
-  for (auto &[peer, peer_replayer] : m_peer_replayers) {
-    dout(10) << ": peer=" << peer << dendl;
-    peer_replayer->add_directory(dir_path);
+  {
+    std::scoped_lock locker(m_lock);
+    m_directories.emplace(dir_path);
+    m_service_daemon->add_or_update_fs_attribute(m_filesystem.fscid, SERVICE_DAEMON_DIR_COUNT_KEY,
+                                                 m_directories.size());
+
+    for (auto &[peer, peer_replayer] : m_peer_replayers) {
+      dout(10) << ": peer=" << peer << dendl;
+      peer_replayer->add_directory(dir_path);
+    }
   }
 }
 
 void FSMirror::handle_release_directory(string_view dir_path) {
   dout(5) << ": dir_path=" << dir_path << dendl;
 
-  std::scoped_lock locker(m_lock);
-  auto it = m_directories.find(dir_path);
-  if (it != m_directories.end()) {
-    m_directories.erase(it);
-    for (auto &[peer, peer_replayer] : m_peer_replayers) {
-      dout(10) << ": peer=" << peer << dendl;
-      peer_replayer->remove_directory(dir_path);
+  {
+    std::scoped_lock locker(m_lock);
+    auto it = m_directories.find(dir_path);
+    if (it != m_directories.end()) {
+      m_directories.erase(it);
+      m_service_daemon->add_or_update_fs_attribute(m_filesystem.fscid, SERVICE_DAEMON_DIR_COUNT_KEY,
+                                                   m_directories.size());
+      for (auto &[peer, peer_replayer] : m_peer_replayers) {
+        dout(10) << ": peer=" << peer << dendl;
+        peer_replayer->remove_directory(dir_path);
+      }
     }
   }
 }
@@ -339,9 +371,12 @@ void FSMirror::add_peer(const Peer &peer) {
   }
 
   auto replayer = std::make_unique<PeerReplayer>(
-    m_cct, this, m_filesystem, peer, m_directories, m_mount);
+    m_cct, this, m_cluster, m_filesystem, peer, m_directories, m_mount, m_service_daemon);
   int r = init_replayer(replayer.get());
   if (r < 0) {
+    m_service_daemon->add_or_update_peer_attribute(m_filesystem.fscid, peer,
+                                                   SERVICE_DAEMON_PEER_INIT_FAILED_KEY,
+                                                   true);
     return;
   }
   m_peer_replayers.emplace(peer, std::move(replayer));

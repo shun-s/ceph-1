@@ -20,15 +20,20 @@ SKIP_CMAKE=${SKIP_CMAKE:-}
 SKIP_DLL_COPY=${SKIP_DLL_COPY:-}
 SKIP_TESTS=${SKIP_TESTS:-}
 SKIP_BINDIR_CLEAN=${SKIP_BINDIR_CLEAN:-}
-NUM_WORKERS=${NUM_WORKERS:-$num_vcpus}
+# Use Ninja's default, it might be useful when having few cores.
+NUM_WORKERS_DEFAULT=$(( $num_vcpus + 2 ))
+NUM_WORKERS=${NUM_WORKERS:-$NUM_WORKERS_DEFAULT}
 DEV_BUILD=${DEV_BUILD:-}
-BUILD_ZIP=${BUILD_ZIP:-}
-# By default, we'll build release binaries with debug symbols attached.
-# If BUILD_ZIP and STRIP_ZIPPED are enabled, we'll strip the binaries
-# that we're going to archive.
+# Unless SKIP_ZIP is set, we're preparing an archive that contains the Ceph
+# binaries, debug symbols as well as the required DLLs.
+SKIP_ZIP=${SKIP_ZIP:-}
+# By default, we'll move the debug symbols to separate files located in the
+# ".debug" directory. If "EMBEDDED_DBG_SYM" is set, the debug symbols will
+# remain embedded in the binaries.
+#
 # Unfortunately we cannot use pdb symbols when cross compiling. cv2pdb
 # well as llvm rely on mspdb*.dll in order to support this proprietary format.
-STRIP_ZIPPED=${STRIP_ZIPPED:-}
+EMBEDDED_DBG_SYM=${EMBEDDED_DBG_SYM:-}
 # Allow for OS specific customizations through the OS flag.
 # Valid options are currently "ubuntu" and "suse".
 
@@ -54,14 +59,27 @@ ALLOCATOR=${ALLOCATOR:-libc}
 # Debug builds don't work with MINGW for the time being, failing with
 # can't close <file>: File too big
 # -Wa,-mbig-obj does not help.
-CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE:-RelWithDebInfo}
+CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE:-}
+if [[ -z $CMAKE_BUILD_TYPE ]]; then
+  # By default, we're building release binaries with minimal debug information.
+  export CFLAGS="$CFLAGS -g1"
+  export CXXFLAGS="$CXXFLAGS -g1"
+  CMAKE_BUILD_TYPE=Release
+fi
+
+# Some tests can't use shared libraries yet due to unspecified dependencies.
+# We'll do a static build by default for now.
+ENABLE_SHARED=${ENABLE_SHARED:-OFF}
 
 binDir="$BUILD_DIR/bin"
 strippedBinDir="$BUILD_DIR/bin_stripped"
+# GDB will look for this directory by default.
+dbgDirname=".debug"
+dbgSymbolDir="$strippedBinDir/${dbgDirname}"
 depsSrcDir="$DEPS_DIR/src"
 depsToolsetDir="$DEPS_DIR/mingw"
 
-generatorUsed="Unix Makefiles"
+cmakeGenerator="Ninja"
 lz4Dir="${depsToolsetDir}/lz4"
 sslDir="${depsToolsetDir}/openssl"
 curlDir="${depsToolsetDir}/curl"
@@ -72,6 +90,8 @@ snappyDir="${depsToolsetDir}/snappy"
 winLibDir="${depsToolsetDir}/windows/lib"
 wnbdSrcDir="${depsSrcDir}/wnbd"
 wnbdLibDir="${depsToolsetDir}/wnbd/lib"
+dokanSrcDir="${depsSrcDir}/dokany"
+dokanLibDir="${depsToolsetDir}/dokany/lib"
 
 depsDirs="$lz4Dir;$curlDir;$sslDir;$boostDir;$zlibDir;$backtraceDir;$snappyDir"
 depsDirs+=";$winLibDir"
@@ -130,13 +150,15 @@ fi
 # or circular), we'll have to stick to static linking.
 cmake -D CMAKE_PREFIX_PATH=$depsDirs \
       -D CMAKE_TOOLCHAIN_FILE="$MINGW_CMAKE_FILE" \
+      -D WITH_LIBCEPHSQLITE=OFF \
       -D WITH_RDMA=OFF -D WITH_OPENLDAP=OFF \
-      -D WITH_GSSAPI=OFF -D WITH_FUSE=OFF -D WITH_XFS=OFF \
+      -D WITH_GSSAPI=OFF -D WITH_XFS=OFF \
+      -D WITH_FUSE=OFF -D WITH_DOKAN=ON \
       -D WITH_BLUESTORE=OFF -D WITH_LEVELDB=OFF \
       -D WITH_LTTNG=OFF -D WITH_BABELTRACE=OFF \
       -D WITH_SYSTEM_BOOST=ON -D WITH_MGR=OFF -D WITH_KVS=OFF \
-      -D WITH_LIBCEPHFS=OFF -D WITH_KRBD=OFF -D WITH_RADOSGW=OFF \
-      -D ENABLE_SHARED=OFF -D WITH_RBD=ON -D BUILD_GMOCK=ON \
+      -D WITH_LIBCEPHFS=ON -D WITH_KRBD=OFF -D WITH_RADOSGW=OFF \
+      -D ENABLE_SHARED=$ENABLE_SHARED -D WITH_RBD=ON -D BUILD_GMOCK=ON \
       -D WITH_CEPHFS=OFF -D WITH_MANPAGE=OFF \
       -D WITH_MGR_DASHBOARD_FRONTEND=OFF -D WITH_SYSTEMD=OFF -D WITH_TESTS=ON \
       -D LZ4_INCLUDE_DIR=$lz4Include -D LZ4_LIBRARY=$lz4Lib \
@@ -147,7 +169,9 @@ cmake -D CMAKE_PREFIX_PATH=$depsDirs \
       -D WNBD_INCLUDE_DIRS="$wnbdSrcDir/include" \
       -D WNBD_LIBRARIES="$wnbdLibDir/libwnbd.a" \
       -D WITH_CEPH_DEBUG_MUTEX=$WITH_CEPH_DEBUG_MUTEX \
-      -G "$generatorUsed" \
+      -D DOKAN_INCLUDE_DIRS="$dokanSrcDir/dokan" \
+      -D DOKAN_LIBRARIES="$dokanLibDir/libdokan.a" \
+      -G "$cmakeGenerator" \
       $CEPH_DIR  2>&1 | tee "${BUILD_DIR}/cmake.log"
 fi # [[ -z $SKIP_CMAKE ]]
 
@@ -155,25 +179,17 @@ if [[ -z $SKIP_BUILD ]]; then
     echo "Building using $NUM_WORKERS workers. Log: ${BUILD_DIR}/build.log"
     echo "" > "${BUILD_DIR}/build.log"
 
-    # We're going to use an associative array having subdirectories as keys
-    # and targets as values.
-    declare -A make_targets
-    make_targets["src/tools"]="ceph-conf rados"
-    make_targets["src/tools/immutable_object_cache"]="all"
-    make_targets["src/tools/rbd"]="all"
-    make_targets["src/tools/rbd_wnbd"]="all"
-    make_targets["src/compressor"]="all"
-    make_targets["src/test"]="all"
-
+    cd $BUILD_DIR
+    ninja_targets="rados rbd rbd-wnbd "
+    ninja_targets+=" ceph-conf ceph-immutable-object-cache"
+    ninja_targets+=" cephfs ceph-dokan"
+    # TODO: do we actually need the ceph compression libs?
+    ninja_targets+=" compressor ceph_lz4 ceph_snappy ceph_zlib ceph_zstd"
     if [[ -z $SKIP_TESTS ]]; then
-      make_targets["src/tools"]+=" ceph_radosacl ceph_scratchtool"
-      make_targets["src/test"]="all"
+      ninja_targets+=" tests ceph_radosacl ceph_scratchtool"
     fi
 
-    for target_subdir in "${!make_targets[@]}"; do
-      echo "Building $target_subdir: ${make_targets[$target_subdir]}" | tee -a "${BUILD_DIR}/build.log"
-      make -j $NUM_WORKERS -C $target_subdir ${make_targets[$target_subdir]} 2>&1 | tee -a "${BUILD_DIR}/build.log"
-    done
+    ninja -v $ninja_targets 2>&1 | tee "${BUILD_DIR}/build.log"
 fi
 
 if [[ -z $SKIP_DLL_COPY ]]; then
@@ -185,20 +201,30 @@ if [[ -z $SKIP_DLL_COPY ]]; then
         $sslDir/bin/libssl-1_1-x64.dll
         $mingwTargetLibDir/libstdc++-6.dll
         $mingwTargetLibDir/libgcc_s_seh-1.dll
-        $mingwLibpthreadDir/libwinpthread-1.dll)
+        $mingwLibpthreadDir/libwinpthread-1.dll
+        $boostDir/lib/*.dll)
     echo "Copying required dlls to $binDir."
     cp ${required_dlls[@]} $binDir
 fi
 
-if [[ -n $BUILD_ZIP ]]; then
+if [[ -z $SKIP_ZIP ]]; then
     # Use a temp directory, in order to create a clean zip file
     ZIP_TMPDIR=$(mktemp -d win_binaries.XXXXX)
-    if [[ -n $STRIP_ZIPPED ]]; then
-        echo "Stripping debug symbols from binaries."
+    if [[ -z $EMBEDDED_DBG_SYM ]]; then
+        echo "Extracting debug symbols from binaries."
         rm -rf $strippedBinDir; mkdir $strippedBinDir
+        rm -rf $dbgSymbolDir; mkdir $dbgSymbolDir
         # Strip files individually, to save time and space
         for file in $binDir/*.exe $binDir/*.dll; do
-            $MINGW_STRIP -o $strippedBinDir/$(basename $file) $file
+            dbgFilename=$(basename $file).debug
+            dbgFile="$dbgSymbolDir/$dbgFilename"
+            strippedFile="$strippedBinDir/$(basename $file)"
+
+            echo "Copying debug symbols: $dbgFile"
+            $MINGW_OBJCOPY --only-keep-debug $file $dbgFile
+            $MINGW_STRIP --strip-debug --strip-unneeded -o $strippedFile $file
+            $MINGW_OBJCOPY --remove-section .gnu_debuglink $strippedFile
+            $MINGW_OBJCOPY --add-gnu-debuglink=$dbgFile $strippedFile
         done
         # Copy any remaining files to the stripped directory
         for file in $binDir/*; do
