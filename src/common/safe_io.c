@@ -222,6 +222,14 @@ int safe_read_file(const char *base, const char *file,
     VOID_TEMP_FAILURE_RETRY(close(fd));
     return len;
   }
+  
+  // Null-terminate the buffer if there's space to prevent buffer overflow
+  // when the data is used as a C string. Only do this if we have space
+  // and didn't fill the entire buffer.
+  if (len >= 0 && (size_t)len < vallen) {
+    val[len] = '\0';
+  }
+  
   // close sometimes returns errors, but only after write()
   VOID_TEMP_FAILURE_RETRY(close(fd));
 

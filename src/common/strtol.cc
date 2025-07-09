@@ -40,8 +40,16 @@ long long strict_strtoll(std::string_view str, int base, std::string *err)
 {
   char *endptr;
   errno = 0; /* To distinguish success/failure after call (see man page) */
-  long long ret = strtoll(str.data(), &endptr, base);
-  if (endptr == str.data() || endptr != str.data() + str.size()) {
+  
+  // Create a null-terminated string since strtoll requires it
+  // std::string_view::data() doesn't guarantee null termination
+  std::string temp_str(str);
+  long long ret = strtoll(temp_str.c_str(), &endptr, base);
+  
+  // Calculate the end position relative to the original string_view
+  ptrdiff_t processed_chars = endptr - temp_str.c_str();
+  
+  if (processed_chars == 0 || processed_chars != static_cast<ptrdiff_t>(str.size())) {
     *err = (std::string{"Expected option value to be integer, got '"} +
 	    std::string{str} + "'");
     return 0;
@@ -83,19 +91,27 @@ double strict_strtod(std::string_view str, std::string *err)
 {
   char *endptr;
   errno = 0; /* To distinguish success/failure after call (see man page) */
-  double ret = strtod(str.data(), &endptr);
+  
+  // Create a null-terminated string since strtod requires it
+  // std::string_view::data() doesn't guarantee null termination
+  std::string temp_str(str);
+  double ret = strtod(temp_str.c_str(), &endptr);
+  
+  // Calculate the end position relative to the original string_view
+  ptrdiff_t processed_chars = endptr - temp_str.c_str();
+  
+  if (processed_chars == 0 || processed_chars != static_cast<ptrdiff_t>(str.size())) {
+    ostringstream oss;
+    oss << "strict_strtod: expected double, got: '" << str << "'";
+    *err = oss.str();
+    return 0;
+  }
   if (errno == ERANGE) {
     ostringstream oss;
     oss << "strict_strtod: floating point overflow or underflow parsing '"
 	<< str << "'";
     *err = oss.str();
     return 0.0;
-  }
-  if (endptr == str) {
-    ostringstream oss;
-    oss << "strict_strtod: expected double, got: '" << str << "'";
-    *err = oss.str();
-    return 0;
   }
   if (*endptr != '\0') {
     ostringstream oss;
@@ -116,19 +132,27 @@ float strict_strtof(std::string_view str, std::string *err)
 {
   char *endptr;
   errno = 0; /* To distinguish success/failure after call (see man page) */
-  float ret = strtof(str.data(), &endptr);
+  
+  // Create a null-terminated string since strtof requires it
+  // std::string_view::data() doesn't guarantee null termination
+  std::string temp_str(str);
+  float ret = strtof(temp_str.c_str(), &endptr);
+  
+  // Calculate the end position relative to the original string_view
+  ptrdiff_t processed_chars = endptr - temp_str.c_str();
+  
+  if (processed_chars == 0 || processed_chars != static_cast<ptrdiff_t>(str.size())) {
+    ostringstream oss;
+    oss << "strict_strtof: expected float, got: '" << str << "'";
+    *err = oss.str();
+    return 0;
+  }
   if (errno == ERANGE) {
     ostringstream oss;
     oss << "strict_strtof: floating point overflow or underflow parsing '"
 	<< str << "'";
     *err = oss.str();
     return 0.0;
-  }
-  if (endptr == str) {
-    ostringstream oss;
-    oss << "strict_strtof: expected float, got: '" << str << "'";
-    *err = oss.str();
-    return 0;
   }
   if (*endptr != '\0') {
     ostringstream oss;
